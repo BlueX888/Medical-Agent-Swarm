@@ -6,20 +6,24 @@ Agent循环引擎
 """
 import uuid
 import json
+import inspect
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
 from .state_manager import StateManager, TaskStatus
 from .llm_client import LLMResponse
+from .safety_guard import SafetyGuard
 
-# Harness Engineering: 约束验证和自动修复
+# Harness Engineering: runtime behavior constraints
 try:
     from constraints import ConstraintValidator
-    from validation import AutoFixer
     CONSTRAINTS_ENABLED = True
 except ImportError:
     logger.warning("Constraints module not found, running without constraint validation")
     CONSTRAINTS_ENABLED = False
+
+
+RUNTIME_ONLY_TOOLS = {"safety_check"}
 
 
 class AgentLoop:
@@ -32,26 +36,77 @@ class AgentLoop:
     - 自动记录每轮的 user/assistant 消息
     """
 
-    def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 2):
+    def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 4):
         """
         初始化Agent循环引擎
 
         Args:
             max_iterations: 最大迭代次数（防止无限循环）
             short_term_memory: 短期记忆管理器（可选）
-            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认2次）
+            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认4次）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
         self.state_manager = StateManager()
         self.short_term_memory = short_term_memory
         self.tool_call_count = 0
+        self.safety_guard = SafetyGuard()
 
-        # Harness Engineering: 约束验证器和自动修复器
+        # Harness Engineering: runtime behavior constraint validator
         self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
-        self.auto_fixer = AutoFixer() if CONSTRAINTS_ENABLED else None
         if CONSTRAINTS_ENABLED:
             logger.debug("✅ Constraint validation enabled")
+
+    def _normalize_tool_policy(self, policy: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Normalize per-request tool policy into allow/deny lists."""
+        policy = policy or {}
+        allow_tools = policy.get("allow_tools") or policy.get("allowed_tools") or []
+        deny_tools = policy.get("deny_tools") or policy.get("denied_tools") or []
+        return {
+            "allow_tools": list(dict.fromkeys(allow_tools)),
+            "deny_tools": list(dict.fromkeys(deny_tools)),
+            "reason": policy.get("reason", ""),
+        }
+
+    def _is_tool_allowed(self, tool_name: str, tool_policy: Dict[str, Any]) -> bool:
+        if tool_name in RUNTIME_ONLY_TOOLS:
+            return False
+        allow_tools = set(tool_policy.get("allow_tools") or [])
+        deny_tools = set(tool_policy.get("deny_tools") or [])
+        if allow_tools and tool_name not in allow_tools:
+            return False
+        return tool_name not in deny_tools
+
+    def _get_tools_for_llm(self, agent, tool_policy: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Get tools from new or legacy agent implementations and apply policy."""
+        allow_tools = tool_policy["allow_tools"]
+        deny_tools = tool_policy["deny_tools"]
+        method = agent.get_tools_for_llm
+        parameters = inspect.signature(method).parameters
+        supports_policy = (
+            "allow_tools" in parameters
+            or "deny_tools" in parameters
+            or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values())
+        )
+
+        if supports_policy:
+            tools = method(allow_tools=allow_tools, deny_tools=deny_tools)
+        else:
+            tools = method()
+
+        allow_set = set(allow_tools or [])
+        deny_set = set(deny_tools or [])
+        filtered_tools = []
+        for tool in tools or []:
+            name = ((tool or {}).get("function") or {}).get("name")
+            if name in RUNTIME_ONLY_TOOLS:
+                continue
+            if allow_set and name not in allow_set:
+                continue
+            if name in deny_set:
+                continue
+            filtered_tools.append(tool)
+        return filtered_tools
 
     async def run(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -65,10 +120,24 @@ class AgentLoop:
             最终结果
         """
         task_id = str(uuid.uuid4())
+        debug_collector = input_data.get("debug_collector")
+        loop_input_data = {
+            key: value
+            for key, value in input_data.items()
+            if key != "debug_collector"
+        }
+        agent_timer = None
+        if debug_collector:
+            agent_timer = debug_collector.time_event(
+                "agent_loop",
+                agent_id=agent.agent_id,
+                input=loop_input_data,
+                name="agent_loop",
+            )
         state = self.state_manager.create_state(
             task_id=task_id,
             agent_id=agent.agent_id,
-            input_data=input_data,
+            input_data=loop_input_data,
             max_iterations=self.max_iterations
         )
 
@@ -81,22 +150,49 @@ class AgentLoop:
             state.status = TaskStatus.IN_PROGRESS
 
             # 初始化消息历史（包含历史对话）
-            messages = self._initialize_messages(agent, input_data, session_id)
+            messages = self._initialize_messages(agent, loop_input_data, session_id)
+            original_user_message = messages[-1]["content"] if messages else str(loop_input_data)
+            latest_risk_level = ""
+            if debug_collector:
+                role_counts: Dict[str, int] = {}
+                for message in messages:
+                    role = str(message.get("role", "unknown"))
+                    role_counts[role] = role_counts.get(role, 0) + 1
+                debug_collector.record_event(
+                    "memory",
+                    agent_id=agent.agent_id,
+                    name="initialize_messages",
+                    input={
+                        "session_id": session_id,
+                        "short_term_memory_enabled": bool(self.short_term_memory),
+                    },
+                    output={
+                        "message_count": len(messages),
+                        "role_counts": role_counts,
+                        "messages": messages,
+                    },
+                    metadata={
+                        "history_message_count": max(0, len(messages) - 2),
+                    },
+                )
 
             # 记录用户消息到短期记忆
             if self.short_term_memory and session_id:
-                user_message = messages[-1]["content"] if messages else str(input_data)
                 self.short_term_memory.add_message(
                     session_id=session_id,
                     role="user",
-                    content=user_message
+                    content=original_user_message
                 )
                 logger.debug(f"Recorded user message to short-term memory (session={session_id})")
 
             # 获取 Agent 的 Skills (OpenAI format)
-            tools_openai_format = agent.get_tools_for_llm()
+            tool_policy = self._normalize_tool_policy(loop_input_data.get("tool_policy"))
+            tools_openai_format = self._get_tools_for_llm(agent, tool_policy)
 
-            logger.debug(f"Agent has {len(tools_openai_format) if tools_openai_format else 0} skills available")
+            logger.debug(
+                f"Agent has {len(tools_openai_format) if tools_openai_format else 0} skills available "
+                f"(deny={tool_policy['deny_tools']})"
+            )
 
             # 主循环：LLM → Skill Calls → Results → LLM
             while state.should_continue():
@@ -109,7 +205,10 @@ class AgentLoop:
                         messages=messages,
                         tools=tools_openai_format,
                         tool_choice="auto",
-                        temperature=agent.config.get('temperature', 0.7)
+                        temperature=agent.config.get('temperature', 0.7),
+                        debug_collector=debug_collector,
+                        trace_name=f"{agent.agent_id}_iteration_{state.iteration}",
+                        agent_id=agent.agent_id,
                     )
 
                     # 记录中间结果
@@ -155,7 +254,58 @@ class AgentLoop:
                         for tool_call in llm_response.tool_calls:
                             # 增加计数
                             self.tool_call_count += 1
-                            logger.debug(f"Executing: {tool_call.name}({tool_call.arguments}) - 第 {self.tool_call_count} 次调用")
+                            logger.debug(
+                                f"Requested tool: {tool_call.name}({tool_call.arguments}) "
+                                f"- 第 {self.tool_call_count} 次调用"
+                            )
+
+                            if not self._is_tool_allowed(tool_call.name, tool_policy):
+                                reason = (
+                                    tool_policy.get("reason")
+                                    or f"Tool {tool_call.name} is not allowed for this request."
+                                )
+                                logger.warning(
+                                    f"Blocked tool call by policy: {tool_call.name} "
+                                    f"(agent={agent.agent_id}, reason={reason})"
+                                )
+                                tool_result = {
+                                    "success": False,
+                                    "error": f"Tool call blocked by policy: {tool_call.name}",
+                                    "skill": tool_call.name,
+                                    "policy_reason": reason,
+                                }
+                                if debug_collector:
+                                    debug_collector.record_event(
+                                        "constraint_check",
+                                        agent_id=agent.agent_id,
+                                        skill_name=tool_call.name,
+                                        name="tool_policy",
+                                        input={
+                                            "agent_id": agent.agent_id,
+                                            "tool_name": tool_call.name,
+                                            "tool_policy": tool_policy,
+                                        },
+                                        output=tool_result,
+                                        status="failed",
+                                        error=tool_result["error"],
+                                        metadata={
+                                            "iteration": state.iteration,
+                                            "tool_call_index": self.tool_call_count,
+                                        },
+                                    )
+                                messages.append(
+                                    agent.llm_client.create_tool_message(
+                                        tool_call_id=tool_call.id,
+                                        tool_name=tool_call.name,
+                                        result=tool_result
+                                    )
+                                )
+                                continue
+
+                            logger.debug(
+                                f"Executing: {tool_call.name}({tool_call.arguments}) "
+                                f"- 第 {self.tool_call_count} 次调用"
+                            )
 
                             # Harness Engineering: 验证调用
                             if self.validator:
@@ -163,15 +313,76 @@ class AgentLoop:
                                     agent.agent_id,
                                     tool_call.name
                                 )
+                                if debug_collector:
+                                    debug_collector.record_event(
+                                        "constraint_check",
+                                        agent_id=agent.agent_id,
+                                        skill_name=tool_call.name,
+                                        name="validate_tool_call",
+                                        input={
+                                            "agent_id": agent.agent_id,
+                                            "tool_name": tool_call.name,
+                                        },
+                                        output=validation_result,
+                                        status="success" if validation_result.get("valid") else "failed",
+                                        error=None if validation_result.get("valid") else validation_result.get("reason"),
+                                        metadata={
+                                            "iteration": state.iteration,
+                                            "tool_call_index": self.tool_call_count,
+                                        },
+                                    )
                                 if not validation_result.get("valid"):
                                     logger.warning(
                                         f"⚠️ 约束警告: {validation_result.get('reason')}"
                                     )
 
-                            tool_result = await agent.execute_tool(
-                                tool_name=tool_call.name,
-                                arguments=tool_call.arguments
-                            )
+                            skill_timer = None
+                            if debug_collector:
+                                skill_timer = debug_collector.time_event(
+                                    "skill_call",
+                                    agent_id=agent.agent_id,
+                                    skill_name=tool_call.name,
+                                    input=tool_call.arguments,
+                                    name=tool_call.name,
+                                    metadata={
+                                        "iteration": state.iteration,
+                                        "tool_call_id": tool_call.id,
+                                        "tool_call_index": self.tool_call_count,
+                                    },
+                                )
+
+                            try:
+                                tool_result = await agent.execute_tool(
+                                    tool_name=tool_call.name,
+                                    arguments=tool_call.arguments
+                                )
+                            except Exception as tool_exc:
+                                if skill_timer:
+                                    skill_timer.finish(
+                                        output={"error": str(tool_exc)},
+                                        status="failed",
+                                        error=str(tool_exc),
+                                    )
+                                raise
+
+                            if skill_timer:
+                                tool_error = (
+                                    tool_result.get("error")
+                                    if isinstance(tool_result, dict)
+                                    else None
+                                )
+                                tool_failed = (
+                                    isinstance(tool_result, dict)
+                                    and tool_result.get("success") is False
+                                ) or bool(tool_error)
+                                skill_timer.finish(
+                                    output=tool_result,
+                                    status="failed" if tool_failed else "success",
+                                    error=str(tool_error) if tool_error else None,
+                                )
+                            extracted_risk_level = self._extract_risk_level(tool_call.name, tool_result)
+                            if extracted_risk_level:
+                                latest_risk_level = extracted_risk_level
 
                             # 添加结果消息
                             messages.append(
@@ -198,29 +409,17 @@ class AgentLoop:
                     else:
                         logger.info(f"LLM provided final response (no tool calls)")
 
-                        # Harness Engineering: 验证和修复输出
+                        # Final-answer content safety is centralized in SafetyGuard.
                         final_answer = llm_response.content
 
-                        if self.validator and final_answer:
-                            validation_result = self.validator.validate_output(
-                                agent.agent_id,
-                                final_answer
-                            )
-
-                            if not validation_result.get("valid"):
-                                logger.warning(
-                                    f"⚠️ 输出约束违规: {validation_result.get('violations')}"
-                                )
-
-                                # 自动修复
-                                if self.auto_fixer and validation_result.get("auto_fixable"):
-                                    fixed_answer = self.auto_fixer.fix_output(
-                                        final_answer,
-                                        validation_result.get("auto_fixable", [])
-                                    )
-                                    if fixed_answer != final_answer:
-                                        logger.info("🔧 输出已自动修复")
-                                        final_answer = fixed_answer
+                        safety_result = await self._run_safety_guard(
+                            final_answer,
+                            original_user_message,
+                            latest_risk_level,
+                            debug_collector=debug_collector,
+                            agent_id=agent.agent_id,
+                        )
+                        final_answer = safety_result["answer"]
 
                         # 记录最终回答到短期记忆
                         if self.short_term_memory and session_id:
@@ -234,7 +433,10 @@ class AgentLoop:
                         result = {
                             'answer': final_answer,
                             'iterations': state.iteration,
-                            'agent_id': agent.agent_id
+                            'agent_id': agent.agent_id,
+                            'safety_checked': safety_result["safety_checked"],
+                            'safety_passed': safety_result["safety_passed"],
+                            'safety_issues': safety_result["safety_issues"],
                         }
 
                         # 让 Agent 进行结果后处理（如提取建议等）
@@ -269,13 +471,28 @@ class AgentLoop:
                     final_response = await agent.llm_client.chat_with_tools(
                         messages=messages,
                         tools=None,
-                        temperature=0.7
+                        temperature=0.7,
+                        debug_collector=debug_collector,
+                        trace_name=f"{agent.agent_id}_forced_final",
+                        agent_id=agent.agent_id,
+                    )
+
+                    final_answer = final_response.content or '抱歉，未能完成任务'
+                    safety_result = await self._run_safety_guard(
+                        final_answer,
+                        original_user_message,
+                        latest_risk_level,
+                        debug_collector=debug_collector,
+                        agent_id=agent.agent_id,
                     )
 
                     result = {
-                        'answer': final_response.content or '抱歉，未能完成任务',
+                        'answer': safety_result["answer"],
                         'iterations': state.iteration,
-                        'warning': 'max_iterations_reached'
+                        'warning': 'max_iterations_reached',
+                        'safety_checked': safety_result["safety_checked"],
+                        'safety_passed': safety_result["safety_passed"],
+                        'safety_issues': safety_result["safety_issues"],
                     }
 
                     # 记录最终回答到短期记忆
@@ -296,16 +513,32 @@ class AgentLoop:
                         'answer': '抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。',
                         'iterations': state.iteration,
                         'warning': 'max_iterations_reached',
-                        'error': str(e)
+                        'error': str(e),
+                        'safety_checked': False,
+                        'safety_passed': False,
+                        'safety_issues': [{
+                            "type": "fallback_generation_error",
+                            "severity": "high",
+                            "message": str(e),
+                        }],
                     }
                     state.mark_completed(result)
 
             logger.info(f"Agent Loop finished: status={state.status.value}, iterations={state.iteration}")
-            return state.final_result or {}
+            final_result = state.final_result or {}
+            if agent_timer:
+                agent_timer.finish(
+                    output=final_result,
+                    status="success" if state.status == TaskStatus.COMPLETED else "failed",
+                    error=state.error,
+                )
+            return final_result
 
         except Exception as e:
             logger.error(f"Agent Loop failed: {e}")
             state.mark_failed(str(e))
+            if agent_timer:
+                agent_timer.finish(status="failed", error=str(e), output={"error": str(e)})
             raise
 
     def _initialize_messages(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -315,16 +548,7 @@ class AgentLoop:
         # 系统提示词
         system_prompt = agent.get_system_prompt()
 
-        # Evolved Skills: 从上下文中提取已匹配的 skill prompt 并注入
-        evolved_skill_prompt = ""
-        context = input_data.get("context")
-        if isinstance(context, dict):
-            evolved_skill_prompt = context.pop("_evolved_skill_prompt", "")
-            context.pop("_injected_skill_ids", None)
-
         if system_prompt:
-            if evolved_skill_prompt:
-                system_prompt = system_prompt + "\n" + evolved_skill_prompt
             messages.append({
                 'role': 'system',
                 'content': system_prompt
@@ -368,3 +592,57 @@ class AgentLoop:
             ]
 
         return message
+
+    def _extract_risk_level(self, tool_name: str, tool_result: Dict[str, Any]) -> str:
+        """Extract risk level from assess_risk or compatible tool results."""
+        if not isinstance(tool_result, dict):
+            return ""
+
+        risk_level = tool_result.get("risk_level", "")
+        if risk_level:
+            return str(risk_level)
+
+        # Keep this permissive in case a future triage Skill nests the result.
+        if tool_name == "assess_risk":
+            data = tool_result.get("data") or tool_result.get("result") or {}
+            if isinstance(data, dict) and data.get("risk_level"):
+                return str(data["risk_level"])
+
+        return ""
+
+    async def _run_safety_guard(
+        self,
+        final_answer: str,
+        original_question: str,
+        risk_level: str,
+        debug_collector: Optional[Any] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run mandatory runtime safety review for the final answer."""
+        timer = None
+        if debug_collector:
+            timer = debug_collector.time_event(
+                "safety_check",
+                agent_id=agent_id,
+                input={
+                    "answer": final_answer or "",
+                    "question": original_question or "",
+                    "risk_level": risk_level or "",
+                },
+                name="agent_loop_safety_guard",
+            )
+
+        safety_result = await self.safety_guard.review(
+            response=final_answer or "",
+            original_question=original_question or "",
+            risk_level=risk_level or "",
+        )
+        if timer:
+            timer.finish(
+                output=safety_result,
+                status="success" if safety_result.get("safety_passed") else "failed",
+                error=None if safety_result.get("safety_checked") else "safety_check_failed",
+            )
+        if not safety_result.get("safety_passed"):
+            logger.warning(f"Runtime safety guard found issues: {safety_result.get('safety_issues')}")
+        return safety_result

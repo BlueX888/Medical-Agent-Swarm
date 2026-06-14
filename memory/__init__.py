@@ -2,8 +2,8 @@
 记忆系统：Agent 的持久化学习和记忆管理
 
 包含：
-- ShortTermMemory：会话级对话历史（内存/Redis）
-- LongTermMemory：跨会话记忆（Mem0）
+- ShortTermMemory：会话级对话历史（默认内存）
+- LongTermMemory：可选跨会话记忆接口（默认禁用）
 """
 
 # 短期和长期记忆
@@ -31,23 +31,6 @@ from .session_summary import (
     PerformanceMetrics
 )
 
-# Evolved Skills: 自进化 Skill 系统
-try:
-    from .evolved_skills import (
-        SkillStore,
-        EvolvedSkill,
-        SkillMatcher,
-        SkillSynthesizer,
-        SkillEvolver,
-        UsageLogger,
-    )
-    _EVOLVED_SKILLS_EXPORTS = [
-        'SkillStore', 'EvolvedSkill', 'SkillMatcher',
-        'SkillSynthesizer', 'SkillEvolver', 'UsageLogger',
-    ]
-except ImportError:
-    _EVOLVED_SKILLS_EXPORTS = []
-
 __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
@@ -65,4 +48,4 @@ __all__ = [
     'KeyFinding',
     'Lesson',
     'PerformanceMetrics',
-] + _EVOLVED_SKILLS_EXPORTS
+]

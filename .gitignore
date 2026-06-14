@@ -62,3 +62,19 @@ knowledge/data/*.db
 # Claude 本地设置
 .claude/settings.local.json
 
+# Codex 本地日志
+.codex-logs/
+
+# 前端构建与 TypeScript 生成文件
+frontend/dist/
+frontend/src/**/*.js
+frontend/src/**/*.d.ts
+!frontend/src/vite-env.d.ts
+
+# 内部评测、性能结果与开发报告
+evaluation/
+PERF_SLO_*.md
+perf_slo_*.json
+SYSTEM_REPORT.md
+SYSTEM_ARCHITECTURE_REPORT.md
+docs/

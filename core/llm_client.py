@@ -31,6 +31,9 @@ class LLMResponse:
     content: Optional[str]
     tool_calls: List[ToolCall]
     finish_reason: str  # "stop", "tool_calls", "length", "content_filter"
+    usage: Dict[str, Any] = None
+    model: Optional[str] = None
+    response_id: Optional[str] = None
 
     def has_tool_calls(self) -> bool:
         """是否包含 function calls"""
@@ -67,6 +70,9 @@ class LLMClient:
         messages: List[Dict[str, str]],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        debug_collector: Optional[Any] = None,
+        trace_name: str = "llm_chat",
+        agent_id: Optional[str] = None,
         **kwargs
     ) -> str:
         """
@@ -85,6 +91,25 @@ class LLMClient:
             max_tokens = max_tokens or self.max_tokens
 
             logger.debug(f"Calling LLM ({self.model_type}) with {len(messages)} messages")
+            timer = None
+            if debug_collector:
+                timer = debug_collector.time_event(
+                    "llm_call",
+                    agent_id=agent_id,
+                    input={
+                        "messages": messages,
+                        "tools": None,
+                        "tool_choice": None,
+                    },
+                    name=trace_name,
+                    metadata={
+                        "model": self.model_name,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "message_count": len(messages),
+                        "tools_count": 0,
+                    },
+                )
 
             response = await self.client.chat.completions.create(
                 model=self.model_name,
@@ -95,10 +120,30 @@ class LLMClient:
             )
 
             content = response.choices[0].message.content
-            logger.debug(f"LLM response length: {len(content)} chars")
-            return content
+            finish_reason = response.choices[0].finish_reason
+            usage = self._usage_to_dict(getattr(response, "usage", None))
+            if timer:
+                timer.finish(
+                    output={
+                        "content": content,
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                        "model": getattr(response, "model", self.model_name),
+                        "response_id": getattr(response, "id", None),
+                    },
+                    metadata={
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                        "model": getattr(response, "model", self.model_name),
+                        "response_id": getattr(response, "id", None),
+                    },
+                )
+            logger.debug(f"LLM response length: {len(content or '')} chars")
+            return content or ""
 
         except Exception as e:
+            if "timer" in locals() and timer:
+                timer.finish(status="failed", error=str(e), output={"error": str(e)})
             logger.error(f"LLM call failed: {e}")
             raise
 
@@ -147,6 +192,9 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        debug_collector: Optional[Any] = None,
+        trace_name: str = "llm_chat_with_tools",
+        agent_id: Optional[str] = None,
         **kwargs
     ) -> LLMResponse:
         """
@@ -183,6 +231,27 @@ class LLMClient:
                 if tool_choice != "auto":
                     request_params["tool_choice"] = tool_choice
 
+            timer = None
+            if debug_collector:
+                timer = debug_collector.time_event(
+                    "llm_call",
+                    agent_id=agent_id,
+                    input={
+                        "messages": messages,
+                        "tools": tools or [],
+                        "tool_choice": tool_choice,
+                    },
+                    name=trace_name,
+                    metadata={
+                        "model": self.model_name,
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "message_count": len(messages),
+                        "tools_count": len(tools or []),
+                        "tool_choice": tool_choice,
+                    },
+                )
+
             response = await self.client.chat.completions.create(**request_params)
 
             # 解析响应
@@ -200,13 +269,43 @@ class LLMClient:
                     ))
                 logger.debug(f"LLM requested {len(tool_calls)} tool calls")
 
+            usage = self._usage_to_dict(getattr(response, "usage", None))
+            response_model = getattr(response, "model", self.model_name)
+            response_id = getattr(response, "id", None)
+            if timer:
+                timer.finish(
+                    output={
+                        "content": message.content,
+                        "tool_calls": [
+                            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                            for tc in tool_calls
+                        ],
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                        "model": response_model,
+                        "response_id": response_id,
+                    },
+                    metadata={
+                        "finish_reason": finish_reason,
+                        "tool_calls_count": len(tool_calls),
+                        "usage": usage,
+                        "model": response_model,
+                        "response_id": response_id,
+                    },
+                )
+
             return LLMResponse(
                 content=message.content,
                 tool_calls=tool_calls,
-                finish_reason=finish_reason
+                finish_reason=finish_reason,
+                usage=usage,
+                model=response_model,
+                response_id=response_id,
             )
 
         except Exception as e:
+            if "timer" in locals() and timer:
+                timer.finish(status="failed", error=str(e), output={"error": str(e)})
             logger.error(f"LLM call with tools failed: {e}")
             raise
 
@@ -233,3 +332,21 @@ class LLMClient:
             "name": tool_name,
             "content": json.dumps(result, ensure_ascii=False)
         }
+
+    def _usage_to_dict(self, usage: Any) -> Dict[str, Any]:
+        """Convert provider token usage objects to a JSON-safe dictionary."""
+        if usage is None:
+            return {}
+        if isinstance(usage, dict):
+            return usage
+        if hasattr(usage, "model_dump") and callable(usage.model_dump):
+            return usage.model_dump()
+        if hasattr(usage, "dict") and callable(usage.dict):
+            return usage.dict()
+        if hasattr(usage, "__dict__"):
+            return {
+                key: value
+                for key, value in vars(usage).items()
+                if not key.startswith("_")
+            }
+        return {}

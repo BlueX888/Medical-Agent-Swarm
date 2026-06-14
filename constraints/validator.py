@@ -5,7 +5,7 @@
 基于 Harness Engineering 原则：
 - 显式化约束
 - 运行时验证
-- 自动修复（可选）
+- 最终文本安全由 SafetyGuard 统一兜底
 """
 from typing import Dict, Any, List, Optional
 import yaml
@@ -75,7 +75,10 @@ class ConstraintValidator:
 
     def validate_output(self, agent_id: str, output: str) -> Dict[str, Any]:
         """
-        验证输出是否符合约束
+        验证输出是否符合约束。
+
+        Legacy helper: AgentLoop no longer calls this in the final-answer path.
+        Final-answer content safety is centralized in SafetyGuard.
 
         Args:
             agent_id: Agent ID
@@ -166,7 +169,7 @@ class ConstraintValidator:
 
         Args:
             question: 用户问题
-            subtasks: LeadAgent 分解的子任务列表
+            subtasks: LangGraph planning 节点分解的子任务列表
 
         Returns:
             {

@@ -10,7 +10,7 @@ import uuid
 
 class EventType(Enum):
     """事件类型枚举"""
-    TASK_DECOMPOSED = "task_decomposed"          # LeadAgent 分解了任务
+    TASK_DECOMPOSED = "task_decomposed"          # LangGraph 规划节点分解了任务
     SUBTASK_STARTED = "subtask_started"          # Agent 开始执行子任务
     SUBTASK_COMPLETED = "subtask_completed"      # Agent 完成子任务
     CONTEXT_UPDATED = "context_updated"          # 共享上下文更新

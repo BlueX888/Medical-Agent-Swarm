@@ -15,16 +15,16 @@ def load_skill_function(skill_name: str, script_name: str, function_name: str, p
     动态加载 Skill 函数
 
     Args:
-        skill_name: Skill 目录名（如 "search-knowledge"）
-        script_name: Python 脚本名（如 "search"）
-        function_name: 函数名（如 "search_knowledge"）
+        skill_name: Skill 目录名（如 "assess-risk"）
+        script_name: Python 脚本名（如 "risk"）
+        function_name: 函数名（如 "assess_risk"）
         project_root: 项目根目录（如果为 None，自动检测）
 
     Returns:
         Skill 函数
 
     Example:
-        search_knowledge = load_skill_function("search-knowledge", "search", "search_knowledge")
+        assess_risk = load_skill_function("assess-risk", "risk", "assess_risk")
     """
     if project_root is None:
         # 自动检测项目根目录（假设当前文件在 core/ 目录）
@@ -88,10 +88,10 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
     Returns:
         [
             {
-                "name": "search-knowledge",
-                "function_name": "search_knowledge",
-                "script_name": "search",
-                "metadata": { "name": "search-knowledge", "description": "..." }
+                "name": "assess-risk",
+                "function_name": "assess_risk",
+                "script_name": "risk",
+                "metadata": { "name": "assess-risk", "description": "..." }
             },
             ...
         ]
@@ -171,13 +171,39 @@ def discover_skills(project_root: Path = None) -> List[Dict]:
     return discovered_skills
 
 
+def is_active_skill(skill_info: Dict) -> bool:
+    """Return whether a discovered skill should be exposed to Agents."""
+    metadata = skill_info.get("metadata") or {}
+    return not (
+        metadata.get("enabled") is False
+        or metadata.get("disabled")
+        or metadata.get("auto_execute")
+    )
+
+
+def discover_active_skills(project_root: Path = None, discovered: List[Dict] = None) -> List[Dict]:
+    """
+    自动扫描并返回 Agent 实际可调用的 Skills。
+
+    与 discover_skills() 不同，该函数会过滤：
+    - enabled: false
+    - disabled: true
+    - auto_execute: true
+    """
+    if discovered is None:
+        discovered = discover_skills(project_root)
+    active = [skill_info for skill_info in discovered if is_active_skill(skill_info)]
+    logger.info(f"Active skills: {len(active)} (discovered {len(discovered)}, skipped {len(discovered) - len(active)})")
+    return active
+
+
 def load_all_skills(project_root: Path = None) -> dict:
     """
     自动扫描并加载所有 Skills
 
     Returns:
         {
-            "search_knowledge": <function>,
+            "assess_risk": <function>,
             "recommend_lifestyle": <function>,
             ...
         }
@@ -185,10 +211,10 @@ def load_all_skills(project_root: Path = None) -> dict:
     if project_root is None:
         project_root = Path(__file__).parent.parent
 
-    discovered = discover_skills(project_root)
+    active = discover_active_skills(project_root)
 
     skills = {}
-    for skill_info in discovered:
+    for skill_info in active:
         function_name = skill_info["function_name"]
         skills[function_name] = skill_info["function"]
 

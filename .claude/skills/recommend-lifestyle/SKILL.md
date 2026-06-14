@@ -15,7 +15,9 @@ description: Provide lifestyle and medication guidance based on disease or sympt
 
 ## 底层实现
 
-- 数据源: Milvus 向量数据库
+- 技术: 内置生活方式模板库
+- 数据源: 高血压、糖尿病、感冒/呼吸道症状、睡眠、体重管理、一般健康模板
+- 特点: 高危或紧急风险时拒绝用生活方式建议替代就医
 
 ## 调用方式
 

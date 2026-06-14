@@ -10,11 +10,11 @@ agents:
 
     # 允许的工具（当前所有 Agent 都注册了全部工具，这里定义推荐使用的工具）
     allowed_tools:
-      - search_knowledge
-      - recommend_lifestyle
+      - collect_clinical_context
       - assess_risk
-      - search_history
-      - search_similar_cases
+      - analyze_symptoms
+      - recommend_lifestyle
+      - deep_research
 
     # 禁止的行为
     forbidden_actions:
@@ -36,12 +36,11 @@ agents:
       - multi_system_analysis
 
     allowed_tools:
+      - collect_clinical_context
       - assess_risk
       - analyze_symptoms
-      - search_knowledge
-      - clinical_guideline
-      - search_history
-      - search_similar_cases
+      - recommend_lifestyle
+      - deep_research
 
     forbidden_actions:
       - recommend_specific_drugs  # 不建议具体药物（只能建议药物类别）
@@ -62,11 +61,11 @@ agents:
       - latest_information
 
     allowed_tools:
-      - clinical_guideline
+      - collect_clinical_context
+      - assess_risk
+      - analyze_symptoms
+      - recommend_lifestyle
       - deep_research
-      - search_knowledge
-      - search_history
-      - search_similar_cases
 
     forbidden_actions:
       - give_diagnosis  # 不能下诊断
@@ -78,12 +77,18 @@ agents:
 
 # 通用约束（所有 Agent 共享）
 common:
+  memory_context:
+    - recent_history is injected automatically by SwarmCoordinator/AgentLoop
+    - historical_cases is injected automatically by SwarmCoordinator
+
   output_constraints:
+    - must_run_safety_guard  # 最终输出必须经过 AgentLoop / SafetyGuard 强制安全审查
     - no_medical_jargon_without_explanation  # 医学术语需要解释
     - no_fear_mongering  # 不制造恐慌
     - no_false_hope  # 不给予虚假希望
 
   safety_rules:
+    - high_risk_questions_must_allow_assess_risk  # 高危问题必须允许风险分诊
     - always_recommend_doctor_for_serious_symptoms  # 严重症状必须建议就医
     - never_delay_emergency_care  # 不能延误急救
     - respect_patient_privacy  # 尊重患者隐私

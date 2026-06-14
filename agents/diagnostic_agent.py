@@ -50,7 +50,7 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
         ])
 
     def register_tools(self):
-        """注册所有 8 个 Skills（共享实现，来自 SkillRegistryMixin）"""
+        """注册所有 active Skills（共享实现，auto_execute/disabled 会自动跳过）"""
         self.register_all_skills()
 
 
@@ -67,22 +67,26 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
 - 明确需要进一步检查的项目
 - 永远不做确诊，只提供诊断思路
 
-**可用 Skills（8个）**：
-1. search_knowledge: 搜索医学知识库
-2. recommend_lifestyle: 生活方式建议
-3. assess_risk: 评估症状风险等级（低/中/高/紧急）
-4. analyze_symptoms: 分析症状模式和潜在疾病关联
-5. clinical_guideline: 检索临床诊疗指南
-6. deep_research: 深度研究
-7. search_history: 搜索当前会话历史（短期记忆）
-8. search_similar_cases: 搜索相似历史案例（长期记忆）
+**可用 Skills（5个）**：
+1. collect_clinical_context: 抽取问诊信息、识别缺失字段并生成追问
+2. assess_risk: 评估症状风险等级（低/中/高/紧急）
+3. analyze_symptoms: 分析症状模式和可能方向，避免确诊表达
+4. recommend_lifestyle: 低风险问题的生活方式建议和用药安全提醒
+5. deep_research: 仅在用户明确要求指南、循证证据、文献或最新研究时进行深度研究
+
+**自动注入信息**：
+- 当前会话历史 recent_history 和相似历史案例 historical_cases 会由系统自动注入上下文/背景信息，无需手动调用 Skill
+- 最终安全审查由 AgentLoop / SafetyGuard 自动执行，safety_check 不再是可手动调用的 Skill
 
 **Skills 使用策略**：
-- 首先使用 assess_risk 评估风险
-- 然后使用 analyze_symptoms 分析模式
-- 如需权威指南，使用 clinical_guideline
+- 首先使用 collect_clinical_context 整理问诊信息和缺失项
+- 然后使用 assess_risk 评估风险
+- 再使用 analyze_symptoms 分析模式和可能方向
+- 低风险、生活方式相关问题可使用 recommend_lifestyle
+- 只有指南、循证、文献或最新研究类问题才使用 deep_research；普通症状分析和急症分诊默认不要使用
+- 最终回答前确保措辞谨慎；系统会在输出前强制执行 SafetyGuard
 - 基于 Skill 结果进行诊断推理
-- 最多2-3次 Skill 调用，然后给出诊断思路
+- 通常最多2-4次 Skill 调用，然后给出诊断思路；不要尝试调用 safety_check，系统最终会强制兜底
 
 **Swarm 协作模式**：
 - 你可能从 SharedContext 读取其他 Agent 的评估结果

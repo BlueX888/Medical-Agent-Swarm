@@ -2,11 +2,13 @@
 统一的 Skills 注册（自动发现）
 所有 Worker Agents 共享
 """
-from core.skill_loader import discover_skills
+from core.skill_loader import discover_skills, discover_active_skills
 from core.skill_registry import SkillParameter
 from pathlib import Path
 from loguru import logger
 import inspect
+import typing
+from typing import get_type_hints, Literal
 
 
 class SkillRegistryMixin:
@@ -26,9 +28,11 @@ class SkillRegistryMixin:
         """
         project_root = Path(__file__).parent.parent
         discovered = discover_skills(project_root)
+        active = discover_active_skills(project_root, discovered)
 
-        # 自动注册所有发现的 skills
-        for skill_info in discovered:
+        # 自动注册所有 active skills（过滤 auto_execute 或显式禁用的）
+        registered_count = 0
+        for skill_info in active:
             function_name = skill_info["function_name"]
             metadata = skill_info["metadata"]
             func = skill_info["function"]
@@ -46,9 +50,13 @@ class SkillRegistryMixin:
                 description=description,
                 parameters=parameters
             )
+            registered_count += 1
             logger.info(f"✅ Registered skill: {function_name}")
 
-        logger.info(f"Total {len(discovered)} skills registered")
+        logger.info(
+            f"Total {registered_count} skills registered "
+            f"(discovered {len(discovered)}, active {len(active)}, skipped {len(discovered) - len(active)})"
+        )
 
     def _infer_skill_parameters(self, skill_info: dict) -> list:
         """
@@ -62,8 +70,13 @@ class SkillRegistryMixin:
         """
         func = skill_info["function"]
 
-        # 获取函数签名
+        # 获取函数签名和类型提示
         sig = inspect.signature(func)
+        try:
+            type_hints = get_type_hints(func)
+        except Exception:
+            type_hints = {}
+
         parameters = []
 
         for param_name, param in sig.parameters.items():
@@ -74,9 +87,16 @@ class SkillRegistryMixin:
             # 判断是否必需
             required = param.default == inspect.Parameter.empty
 
-            # 推断类型（简单规则）
+            # 推断类型和 enum
             param_type = "string"
-            if "count" in param_name or "limit" in param_name or "max" in param_name or "iterations" in param_name:
+            enum_values = None
+
+            hint = type_hints.get(param_name)
+            if hint is not None and getattr(hint, '__origin__', None) is Literal:
+                # typing.Literal["a", "b", "c"] → enum
+                enum_values = list(hint.__args__)
+                param_type = "string"
+            elif "count" in param_name or "limit" in param_name or "max" in param_name or "iterations" in param_name:
                 param_type = "number"
 
             # 生成描述
@@ -86,7 +106,8 @@ class SkillRegistryMixin:
                 param_name,
                 param_type,
                 param_desc,
-                required
+                required,
+                enum=enum_values,
             ))
 
         return parameters

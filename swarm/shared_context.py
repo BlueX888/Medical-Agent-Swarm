@@ -1,11 +1,8 @@
 """
-SharedContext：Agent 群体智能的共享环境（信息素系统）
+SharedContext：Agent Swarm 的共享环境（黑板系统）
 
-类比：
-- 蚁群：蚂蚁通过信息素在地面留下痕迹，其他蚂蚁通过感知信息素来决定行动
-- Swarm：Agent 通过 SharedContext 留下数据，其他 Agent 通过读取数据来决定行动
-
-这是去中心化协作的核心：没有中心控制节点，只有共享环境
+Swarm 中的规划节点、Worker Agent 和汇总节点通过 SharedContext 留下子任务、
+贡献和事件记录，供协作流程读取和审计。
 """
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,7 +28,7 @@ class SubTask:
     """
     子任务数据类
 
-    LeadAgent 分解任务后发布到 SharedContext
+    MedicalSwarmGraph 规划节点分解任务后发布到 SharedContext
     直接指定由哪个 Agent 执行
     """
     id: str
@@ -44,6 +41,7 @@ class SubTask:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     dependencies: List[str] = field(default_factory=list)  # 依赖的其他 SubTask ID
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def can_be_executed(self) -> bool:
         """判断是否可以被执行"""
@@ -90,12 +88,10 @@ class SharedContext:
     共享环境：Agent 之间的通信介质
 
     核心特性：
-    1. 去中心化：没有中心控制节点
-    2. 黑板系统：所有 Agent 都能读写
+    1. 共享黑板：规划节点和 Worker Agent 都能读写
+    2. 事件审计：记录协作过程中的关键状态变化
     3. 事件驱动：通过事件通知变化
     4. 时间有序：所有操作都有时间戳
-
-    设计灵感：蚁群的信息素系统
     """
 
     def __init__(self, session_id: Optional[str] = None):
@@ -108,7 +104,7 @@ class SharedContext:
         # 事件流（按时间顺序）
         self.events: List[Event] = []
 
-        # 任务分解（LeadAgent 发布）
+        # 任务分解（MedicalSwarmGraph 规划节点发布）
         self.task_decomposition: Dict[str, SubTask] = {}
 
         # Agent 贡献（WorkerAgent 写入）
@@ -156,7 +152,7 @@ class SharedContext:
         # 发布事件
         self.publish_event(Event(
             type=EventType.TASK_DECOMPOSED,
-            source_agent="lead_agent",
+            source_agent="medical_swarm_graph",
             data={
                 "subtask_id": subtask.id,
                 "type": subtask.type,

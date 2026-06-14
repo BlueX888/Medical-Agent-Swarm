@@ -1,11 +1,11 @@
 ---
 name: deep-research
-description: Conduct deep research combining web search, knowledge base, and evidence synthesis. Use for complex medical questions requiring latest research or comprehensive literature review.
+description: Conduct deep research combining web search and evidence synthesis. Use for complex medical questions requiring latest research or comprehensive literature review.
 ---
 
 # Deep Research (深度研究)
 
-综合网络搜索、知识库和证据综合的深度研究能力。
+综合网络搜索和证据综合的深度研究能力。
 
 ## When to Use
 
@@ -16,7 +16,7 @@ description: Conduct deep research combining web search, knowledge base, and evi
 ## 底层实现
 
 - 工作流: `DeepResearchWorkflow`
-- 数据源: Web Search + Milvus 向量数据库 + 证据综合
+- 数据源: Web Search + 证据综合
 - 技术: 并行搜索和检索 + LLM 证据综合
 
 ## 调用方式

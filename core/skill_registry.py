@@ -107,7 +107,11 @@ class SkillRegistry:
                 "skill": name
             }
 
-    def to_openai_format(self) -> List[Dict[str, Any]]:
+    def to_openai_format(
+        self,
+        allow_tools: Optional[List[str]] = None,
+        deny_tools: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         直接转换为 OpenAI function calling 格式
 
@@ -115,8 +119,15 @@ class SkillRegistry:
             OpenAI tools 格式的列表
         """
         tools = []
+        allow_set = set(allow_tools or [])
+        deny_set = set(deny_tools or [])
 
         for name, skill in self.skills.items():
+            if allow_set and name not in allow_set:
+                continue
+            if name in deny_set:
+                continue
+
             properties = {}
             required = []
 

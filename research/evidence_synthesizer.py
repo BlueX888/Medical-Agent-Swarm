@@ -3,7 +3,7 @@
 
 整合多个来源的信息，生成结构化的研究报告
 """
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 from loguru import logger
@@ -48,8 +48,7 @@ class EvidenceSynthesizer:
     async def synthesize(
         self,
         query: str,
-        web_results: List[SearchResult] = None,
-        kb_results: List[Dict[str, Any]] = None
+        web_results: List[SearchResult] = None
     ) -> ResearchReport:
         """
         综合多来源信息
@@ -57,7 +56,6 @@ class EvidenceSynthesizer:
         Args:
             query: 研究问题
             web_results: 网络搜索结果
-            kb_results: 知识库检索结果
 
         Returns:
             研究报告
@@ -66,11 +64,9 @@ class EvidenceSynthesizer:
 
         if web_results is None:
             web_results = []
-        if kb_results is None:
-            kb_results = []
 
         # 构建综合提示
-        prompt = self._build_synthesis_prompt(query, web_results, kb_results)
+        prompt = self._build_synthesis_prompt(query, web_results)
 
         try:
             # 调用 LLM 进行综合
@@ -79,7 +75,7 @@ class EvidenceSynthesizer:
             ])
 
             # 解析响应生成报告
-            report = self._parse_response(query, response, web_results, kb_results)
+            report = self._parse_response(query, response, web_results)
 
             logger.info(f"Research report generated: {len(report.key_findings)} findings")
             return report
@@ -95,8 +91,7 @@ class EvidenceSynthesizer:
     def _build_synthesis_prompt(
         self,
         query: str,
-        web_results: List[SearchResult],
-        kb_results: List[Dict[str, Any]]
+        web_results: List[SearchResult]
     ) -> str:
         """构建综合提示"""
         prompt = f"""你是医学证据综合专家。请整合以下来源的信息，回答用户问题。
@@ -113,15 +108,6 @@ class EvidenceSynthesizer:
                 prompt += f"{i}. {result.title}\n"
                 prompt += f"   来源: {result.url}\n"
                 prompt += f"   摘要: {result.snippet}\n\n"
-
-        # 添加知识库检索结果（Milvus 返回的字典）
-        if kb_results:
-            prompt += "【知识库检索结果】\n"
-            for i, doc in enumerate(kb_results[:5], 1):
-                metadata = doc.get('metadata', {})
-                prompt += f"{i}. {metadata.get('title', '医学知识')}\n"
-                prompt += f"   内容: {doc.get('content', '')[:300]}...\n"
-                prompt += f"   相似度: {doc.get('score', 0):.2f}\n\n"
 
         prompt += """
 请生成综合研究报告，包含以下部分：
@@ -165,8 +151,7 @@ class EvidenceSynthesizer:
         self,
         query: str,
         response: str,
-        web_results: List[SearchResult],
-        kb_results: List[Dict[str, Any]]
+        web_results: List[SearchResult]
     ) -> ResearchReport:
         """解析 LLM 响应"""
         import re
@@ -243,14 +228,6 @@ class EvidenceSynthesizer:
                 "type": "web",
                 "title": result.title,
                 "url": result.url
-            })
-
-        for doc in kb_results[:5]:
-            metadata = doc.get('metadata', {})
-            report.sources.append({
-                "type": "knowledge_base",
-                "title": metadata.get("title", "医学知识"),
-                "id": doc.get('id', 'unknown')
             })
 
         return report

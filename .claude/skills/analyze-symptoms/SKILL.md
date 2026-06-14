@@ -15,9 +15,9 @@ description: Analyze symptom patterns and potential disease associations. Use wh
 
 ## 底层实现
 
-- 技术: 症状分类规则引擎 + Milvus 向量数据库
-- 数据源: 本地症状规则库 + 医学知识库（RAG）
-- 增强: 从知识库检索疾病详细信息
+- 技术: 症状分类规则引擎 + 症状组合规则
+- 数据源: 内置症状系统分类和高危组合规则
+- 特点: 输出“可能方向”而不是确诊
 
 ## 调用方式
 

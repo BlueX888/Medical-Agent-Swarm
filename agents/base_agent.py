@@ -28,7 +28,10 @@ class BaseAgent(ABC):
         self.agent_id = agent_id
         self.config = config
         self.llm_client = llm_client or LLMClient(model_type=config.get('model', 'openai_compatible'))
-        self.loop = AgentLoop(max_iterations=config.get('max_iterations', 10))
+        self.loop = AgentLoop(
+            max_iterations=config.get('max_iterations', 10),
+            max_tool_calls=config.get('max_tool_calls', 4),
+        )
 
         # Skill 注册表
         self.skill_registry = SkillRegistry()
@@ -57,9 +60,16 @@ class BaseAgent(ABC):
         """注册 Agent 的 Skills（子类必须实现）"""
         pass
 
-    def get_tools_for_llm(self) -> List[Dict[str, Any]]:
+    def get_tools_for_llm(
+        self,
+        allow_tools: Optional[List[str]] = None,
+        deny_tools: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """获取 OpenAI function calling 格式的列表"""
-        return self.skill_registry.to_openai_format()
+        return self.skill_registry.to_openai_format(
+            allow_tools=allow_tools,
+            deny_tools=deny_tools,
+        )
 
     async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -144,7 +154,11 @@ class BaseAgent(ABC):
         """附加 AgentIdentityManager（由 Swarm 调用）"""
         self.identity_manager = identity_manager
 
-    async def process_subtask(self, subtask: Any) -> Dict[str, Any]:
+    async def process_subtask(
+        self,
+        subtask: Any,
+        debug_collector: Optional[Any] = None,
+    ) -> Dict[str, Any]:
         """
         处理子任务（Swarm 模式）
 
@@ -157,5 +171,10 @@ class BaseAgent(ABC):
             'subtask_id': subtask.id,
             'subtask_type': subtask.type
         }
+        metadata = getattr(subtask, "metadata", {}) or {}
+        if metadata.get("tool_policy"):
+            input_data["tool_policy"] = metadata["tool_policy"]
+        if debug_collector:
+            input_data["debug_collector"] = debug_collector
 
         return await self.run_loop(input_data)

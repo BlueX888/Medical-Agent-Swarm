@@ -19,6 +19,18 @@ sys.path.insert(0, str(project_root))
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from swarm import SwarmCoordinator, process_with_swarm, SharedContext, EventType
 from memory import AgentIdentityManager, ShortTermMemory, LongTermMemory
+from core.skill_loader import load_skill_function, discover_skills, discover_active_skills, load_all_skills
+from core.medical_safety_rules import review_medical_safety
+from examples.test_safety_guard import (
+    test_auto_safety_check_without_tool_call,
+    test_child_allergy_emergency_warning,
+    test_dangerous_medication_detected,
+    test_pregnancy_hypertension_emergency_warning,
+    test_risk_level_from_assess_risk_result,
+    test_safety_check_filtered_from_agent_tools,
+    test_safety_check_tool_call_is_blocked,
+    test_stroke_fast_emergency_warning,
+)
 
 # Harness Engineering 模块
 try:
@@ -36,6 +48,11 @@ logger.add(
     format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
     level="INFO"
 )
+
+
+def load_project_skill(skill_name: str, script_name: str, function_name: str):
+    """加载项目内 Skill 函数，避免单元测试触发 LLM。"""
+    return load_skill_function(skill_name, script_name, function_name, project_root)
 
 
 # ============================================================================
@@ -76,20 +93,20 @@ async def generate_test_report(passed: int, failed: int, total: int, context_awa
 | | - 向后兼容性 | ✅ |
 | **Phase 3** | 记忆系统 | {'✅' if context_aware else '⚠️'} |
 | | - 短期记忆（会话级） | ✅ |
-| | - 长期记忆（Mem0云服务） | ✅ |
+| | - 长期记忆接口（默认禁用） | ✅ |
 | | - 记忆系统端到端集成 | {'✅' if context_aware else '⚠️'} |
-| **Phase 4** | 精简高质量工具 | ✅ |
-| | - 生活方式建议工具 | ✅ |
-| | - 临床指南检索工具 | ✅ |
+| **Phase 4** | 核心医疗 Skills | ✅ |
+| | - 问诊补全、风险分诊、症状分析 | ✅ |
+| | - 生活方式模板与运行时安全审查 | ✅ |
 | **Phase 5** | DeepResearch 深度研究 | ✅ |
 | | - 证据综合器 | ✅ |
 | | - 工具集成到 ResearchAgent | ✅ |
 | | - 端到端测试 | ✅ |
 | **Skills 架构** | Skills-Agent 两层架构 | ✅ |
-| | - 6个原子 Skills 自包含 | ✅ |
-| | - Agent 注册所有6个 Skills | ✅ |
+| | - 5个可调用核心医疗 Skills 自包含 | ✅ |
+| | - Agent 注册5个核心医疗 Skills | ✅ |
 | | - Agent 自主选择 Skills | ✅ |
-| | - Milvus 知识库集成 | ✅ |
+| | - 流程型医疗能力自包含 | ✅ |
 
 ---
 
@@ -101,48 +118,47 @@ async def generate_test_report(passed: int, failed: int, total: int, context_awa
 - ✅ **工具注册与执行**：支持 function calling，工具调用成功率 100%
 - ✅ **错误处理**：工具调用失败时能够优雅降级
 
-### 2. Agent Swarm（群体智能）
+### 2. Agent Swarm（LangGraph 编排协作）
 
-- ✅ **去中心化协作**：无中心控制节点，Agent 通过 SharedContext 间接通信
-- ✅ **自主任务认领**：基于能力匹配（capability matching）自动认领任务
+- ✅ **LangGraph 编排协作**：MedicalSwarmGraph 统一管理任务规划、条件路由、并行 Worker 调度和结果综合
+- ✅ **共享上下文协作**：Agent 通过 SharedContext 写入子任务状态、贡献和事件
 - ✅ **并行执行**：多个 Agent 并行处理子任务，提升效率
 - ✅ **智能路由**：简单问题→单 Agent，复杂问题→Swarm 协作
 
 ### 3. 记忆系统
 
-- ✅ **短期记忆**：会话级对话历史，支持内存/Redis 存储
-- ✅ **长期记忆**：Mem0 云服务集成，向量相似度搜索
+- ✅ **短期记忆**：会话级对话历史，默认内存存储
+- ✅ **长期记忆接口**：保留可选跨会话记忆能力，默认禁用
 - {'✅' if context_aware else '⚠️'} **上下文利用**：{'多轮对话上下文正常' if context_aware else '需进一步优化'}
 
 ### 4. Skills 架构（两层架构）
 
-**所有 Agent 共享6个 Skills**：
-- ✅ `search_knowledge`: 医学知识库搜索（**Milvus 语义检索**）
-- ✅ `recommend_lifestyle`: 生活方式和用药建议（**Milvus 检索**）
+**所有 Agent 共享5个可调用核心医疗 Skills**：
+- ✅ `collect_clinical_context`: 问诊信息抽取、缺失字段识别和追问生成
 - ✅ `assess_risk`: 风险等级评估（规则引擎）
 - ✅ `analyze_symptoms`: 症状模式分析（规则引擎）
-- ✅ `clinical_guideline`: 临床指南检索（**Milvus 检索**）
+- ✅ `recommend_lifestyle`: 生活方式和用药安全建议（内置模板）
 - ✅ `deep_research`: 深度研究（网络搜索 + 证据综合）
+- ✅ `SafetyGuard`: 最终回答运行时安全审查（系统模块，不是 Agent Skill）
 
 **关键特性**：
-- ✅ Skills 自包含，直接调用 Milvus 或内置逻辑
-- ✅ Agent 注册所有6个 Skills，根据任务自主选择
+- ✅ 核心流程型 Skills 自包含，不依赖本地向量库
+- ✅ Agent 注册所有5个核心医疗 Skills，根据任务自主选择
 - ✅ 无需 Tools 层，简化为两层架构
 
 ### 5. DeepResearch
 
 - ✅ **网络搜索模块**：DuckDuckGo 搜索 API 集成
-- ✅ **本地知识库**：Qdrant 向量数据库（双模式支持）
 - ✅ **证据综合器**：LLM 驱动的多来源信息整合
 - ✅ **深度研究工作流**：查询规划 → 并行搜索 → 证据综合 → 质量验证
 
-### 6. Milvus 知识库
+### 6. 医疗流程型安全能力
 
-- ✅ **统一知识管理**：所有医学知识统一存储在 Milvus 向量数据库
-- ✅ **数据来源**：txt 文档（`knowledge/data/documents/`）
-- ✅ **语义检索**：支持模糊查询（"血压高" → "高血压"）
-- ✅ **类型过滤**：lifestyle、disease_classification、clinical_guideline
-- ✅ **易于扩展**：添加新知识无需修改代码，直接导入 txt 文件
+- ✅ **问诊补全**：抽取年龄、性别、症状、持续时间、严重程度、既往史和用药史
+- ✅ **风险分诊**：红旗症状、症状组合和特殊人群加权
+- ✅ **症状分析**：输出可能方向而不是确诊
+- ✅ **生活方式模板**：低风险场景提供饮食、运动、睡眠和用药安全建议
+- ✅ **安全审查**：检查过度诊断、遗漏急症提醒、危险用药建议和免责声明
 
 ---
 
@@ -152,34 +168,33 @@ async def generate_test_report(passed: int, failed: int, total: int, context_awa
 ```
 用户问题
    ↓
-SwarmCoordinator（智能路由）
+SwarmCoordinator（稳定入口）
    ├─ 简单 → 单 Agent
    └─ 复杂 → Swarm
           ↓
-     LeadAgent（分解任务）
+     MedicalSwarmGraph planning 节点
           ↓
     发布到 SharedContext
           ↓
     ┌─────┴─────┬────────┐
     ↓           ↓        ↓
 ConsultAgent DiagAgent ResearchAgent
-（自主认领） （并行执行）（写入贡献）
+（分配执行） （并行执行）（写入贡献）
     │           │        │
     └───────────┴────────┘
           ↓
-    LeadAgent（汇总结果）
+    MedicalSwarmGraph synthesis 节点
 ```
 
-### 知识库架构
+### 核心医疗 Skill 流程
 ```
-txt 文档（knowledge/data/documents/）
+collect_clinical_context
           ↓
-    Milvus Lite 向量数据库
-    （BAAI/bge-small-zh-v1.5, 512维）
+assess_risk
           ↓
-    语义检索（COSINE 相似度）
+analyze_symptoms / recommend_lifestyle / deep_research
           ↓
-    Agent 工具调用
+SafetyGuard runtime review
 ```
 
 ---
@@ -189,11 +204,9 @@ txt 文档（knowledge/data/documents/）
 | 组件 | 技术 |
 |------|------|
 | LLM | OpenAI Compatible API |
-| 向量数据库（知识库） | Milvus Lite |
-| 向量数据库（DeepResearch） | Qdrant |
-| Embedding 模型 | BAAI/bge-small-zh-v1.5 (512维，统一使用) |
-| 长期记忆 | Mem0 云服务 |
-| 短期记忆 | 内存/Redis |
+| 核心医疗 Skills | 规则引擎 + 内置模板 |
+| 长期记忆 | 可选接口，默认禁用 |
+| 短期记忆 | 内存 |
 | 网络搜索 | DuckDuckGo Search API |
 
 ---
@@ -204,7 +217,7 @@ txt 文档（knowledge/data/documents/）
 - ✅ **集成测试**: Agent + Swarm + Memory
 - ✅ **端到端测试**: 完整医疗咨询流程
 - ✅ **性能测试**: 并行执行效率
-- ✅ **降级测试**: Milvus 失败时自动降级到硬编码数据
+- ✅ **安全测试**: 问诊补全、风险分诊、生活方式拒绝和 SafetyGuard
 
 ---
 
@@ -212,7 +225,7 @@ txt 文档（knowledge/data/documents/）
 
 1. **记忆系统上下文利用**: {'✅ 正常工作' if context_aware else '⚠️ 需进一步优化，多轮对话时上下文利用不够充分'}
 2. **DeepResearch 依赖外部服务**: 网络搜索依赖 DuckDuckGo，可能受网络限制
-3. **Milvus Lite 并发写入**: 不支持并发写入，数据导入需串行执行
+3. **规则覆盖范围**: 核心医疗 Skills 使用内置规则和模板，复杂或最新证据问题需要 DeepResearch 或医生评估
 
 ---
 
@@ -222,11 +235,11 @@ txt 文档（knowledge/data/documents/）
 
 系统已实现：
 - ✅ LLM 驱动的 Agent Loop
-- ✅ 去中心化的 Agent Swarm 群体智能
+- ✅ LangGraph 编排的 Agent Swarm 协作流程
 - ✅ 短期+长期记忆系统
-- ✅ 7个精简高质量工具
+- ✅ 5个核心医疗流程型 Skills
 - ✅ DeepResearch 深度研究能力
-- ✅ Milvus 统一知识库架构
+- ✅ 安全审查和运行时约束
 
 适用场景：
 - 💊 通用健康咨询
@@ -356,7 +369,7 @@ async def test_shared_context():
 async def test_agent_capabilities():
     """测试 2.2: Agent 能力匹配"""
     print("\n" + "="*70)
-    print("测试 2.2: Agent 能力标签和任务认领")
+    print("测试 2.2: Agent 能力标签和任务匹配")
     print("="*70)
 
     diag_agent = DiagnosticAgent()
@@ -570,17 +583,16 @@ async def test_short_term_memory():
 
 
 async def test_long_term_memory():
-    """测试 4.2: 长期记忆（Mem0）"""
+    """测试 4.2: 长期记忆接口"""
     print("\n" + "="*70)
-    print("测试 4.2: 长期记忆（Mem0云服务）")
+    print("测试 4.2: 长期记忆接口（默认可禁用）")
     print("="*70)
 
     ltm = LongTermMemory()
 
     if not ltm.enabled:
-        print("⚠️  Mem0未配置，跳过测试")
-        print("   配置方法：在父目录的 config.py 中设置 MEM0_CONFIG['api_key']")
-        print("✅ 测试 4.2 跳过（Mem0未配置）")
+        print("⚠️  长期记忆未启用，跳过外部记忆测试")
+        print("✅ 测试 4.2 跳过（长期记忆未启用）")
         return
 
     print(f"✅ Mem0已启用")
@@ -724,91 +736,161 @@ async def test_memory_integration():
 # Phase 4 测试：工具扩展
 # ============================================================================
 
-async def test_recommend_lifestyle():
-    """测试 5.1: 生活方式建议工具 (recommend_lifestyle)"""
+async def test_collect_clinical_context():
+    """测试 5.1: 问诊补全 Skill (collect_clinical_context)"""
     print("\n" + "="*70)
-    print("测试 5.1: 生活方式建议工具 (recommend_lifestyle)")
+    print("测试 5.1: 问诊补全 Skill (collect_clinical_context)")
     print("="*70)
 
-    agent = ConsultationAgent()
+    collect_context = load_project_skill(
+        "collect-clinical-context",
+        "context",
+        "collect_clinical_context"
+    )
 
-    result = await agent.process({
-        "question": "我有高血压，应该如何调整生活方式和用药？",
-        "context": {"age": 55, "diagnosis": "高血压"}
-    })
+    result = await collect_context("52岁男性，高血压10年，胸痛2小时，伴呼吸困难")
 
-    assert "answer" in result, "结果缺少answer字段"
+    assert result["extracted_context"]["age"] == "52岁", "应该抽取年龄"
+    assert result["extracted_context"]["sex"] == "男", "应该抽取性别"
+    assert result["missing_fields"], "缺失字段列表不应为空"
+    assert result["follow_up_questions"], "应该生成追问"
+    assert result["needs_urgent_attention"], "胸痛伴呼吸困难应标记潜在高危"
 
-    # 检查是否包含生活方式相关内容
-    answer = result["answer"]
-    assert any(keyword in answer for keyword in ["饮食", "运动", "生活", "用药", "药物"]), \
-        "答案应包含生活方式或用药建议"
-
-    print(f"\n✅ 测试通过！答案长度：{len(answer)} 字符")
-    print(f"\n{'='*70}")
-    print(f"📋 完整答案:")
-    print(f"{'='*70}")
-    print(answer)
-    print(f"{'='*70}")
+    print(f"\n✅ 缺失字段: {[item['field'] for item in result['missing_fields']]}")
+    print(f"✅ 高危标记: {result['high_risk_flags']}")
     print("✅ 测试 5.1 通过！")
 
 
-async def test_disease_classification():
-    """测试 5.2: 疾病分类查询（使用 search_knowledge 兜底）"""
+async def test_assess_risk_rules():
+    """测试 5.2: 风险分诊规则 (assess_risk)"""
     print("\n" + "="*70)
-    print("测试 5.2: 疾病分类查询（使用 search_knowledge 兜底）")
+    print("测试 5.2: 风险分诊规则 (assess_risk)")
     print("="*70)
 
-    agent = DiagnosticAgent()
+    assess_risk = load_project_skill("assess-risk", "risk", "assess_risk")
 
-    result = await agent.process({
-        "question": "2型糖尿病属于哪一类疾病？有哪些常见并发症？",
-        "context": {}
-    })
+    result = await assess_risk("胸痛，呼吸困难，出汗", age="68岁", medical_history="高血压")
 
-    assert "answer" in result, "结果缺少answer字段"
+    assert result["risk_level"] in {"high", "emergency"}, "胸痛/呼吸困难应分到高风险或紧急"
+    assert any("胸痛" in reason or "呼吸困难" in reason for reason in result["reasons"]), \
+        "风险依据应包含胸痛或呼吸困难"
+    assert "立即" in result["recommendation"] or "就医" in result["recommendation"], \
+        "高风险应包含就医行动建议"
 
-    # 检查是否包含疾病相关内容
-    answer = result["answer"]
-    assert any(keyword in answer for keyword in ["内分泌", "代谢", "并发症", "分类", "糖尿病"]), \
-        "答案应包含疾病分类或并发症信息"
-
-    print(f"\n✅ 测试通过！答案长度：{len(answer)} 字符")
-    print(f"\n{'='*70}")
-    print(f"📋 完整答案:")
-    print(f"{'='*70}")
-    print(answer)
-    print(f"{'='*70}")
+    print(f"\n✅ 风险等级: {result['risk_level']}")
+    print(f"✅ 行动建议: {result['recommendation']}")
     print("✅ 测试 5.2 通过！")
 
 
-async def test_clinical_guidelines():
-    """测试 5.3: 临床指南检索工具 (search_clinical_guidelines)"""
+async def test_analyze_symptoms_rules():
+    """测试 5.3: 症状分析不输出确诊 (analyze_symptoms)"""
     print("\n" + "="*70)
-    print("测试 5.3: 临床指南检索工具 (search_clinical_guidelines)")
+    print("测试 5.3: 症状分析不输出确诊 (analyze_symptoms)")
     print("="*70)
 
-    agent = ResearchAgent()
+    analyze_symptoms = load_project_skill("analyze-symptoms", "symptoms", "analyze_symptoms")
 
-    result = await agent.process({
-        "question": "高血压的最新诊疗指南建议是什么？诊断标准是什么？",
-        "context": {}
-    })
-
-    assert "answer" in result, "结果缺少answer字段"
-
-    # 检查是否包含指南相关内容
+    result = await analyze_symptoms("发热，咳嗽，咽痛两天")
     answer = result["answer"]
-    assert any(keyword in answer for keyword in ["指南", "标准", "诊断", "140", "90"]), \
-        "答案应包含临床指南信息"
 
-    print(f"\n✅ 测试通过！答案长度：{len(answer)} 字符")
-    print(f"\n{'='*70}")
-    print(f"📋 完整答案:")
-    print(f"{'='*70}")
-    print(answer)
-    print(f"{'='*70}")
+    assert result["possible_directions"], "应该输出可能方向"
+    assert "非诊断" in answer or "不能作为确诊" in answer, "应该明确不是确诊"
+    forbidden = ["确诊为", "你患有", "您患有"]
+    assert not any(term in answer for term in forbidden), "症状分析不应输出确诊表达"
+
+    print(f"\n✅ 可能方向: {result['possible_diseases']}")
     print("✅ 测试 5.3 通过！")
+
+
+async def test_recommend_lifestyle():
+    """测试 5.4: 生活方式建议使用内置模板 (recommend_lifestyle)"""
+    print("\n" + "="*70)
+    print("测试 5.4: 生活方式建议使用内置模板 (recommend_lifestyle)")
+    print("="*70)
+
+    recommend_lifestyle = load_project_skill(
+        "recommend-lifestyle",
+        "lifestyle",
+        "recommend_lifestyle"
+    )
+
+    result = await recommend_lifestyle("高血压", risk_level="low")
+
+    assert result["source"] == "built_in_templates", "生活方式建议应使用内置模板"
+    assert not result["refused"], "低风险生活方式问题不应拒绝"
+    assert any(category in result["categories"] for category in ["diet", "exercise"]), \
+        "应包含饮食和运动建议类别"
+    assert "饮食" in result["answer"] and "运动" in result["answer"], "答案应包含生活方式内容"
+
+    high_risk = await recommend_lifestyle("胸痛伴呼吸困难", risk_level="emergency")
+    assert high_risk["refused"], "高危问题应拒绝用生活方式建议替代就医"
+    assert "就医" in high_risk["answer"], "高危拒绝应提示就医"
+
+    print(f"\n✅ 模板: {result['template']}")
+    print("✅ 测试 5.4 通过！")
+
+
+async def test_safety_check():
+    """测试 5.5: 运行时安全规则发现危险表达"""
+    print("\n" + "="*70)
+    print("测试 5.5: 运行时安全规则发现危险表达")
+    print("="*70)
+
+    result = review_medical_safety(
+        "你就是高血压，自己加药即可，不用去医院。",
+        original_question="胸痛伴呼吸困难怎么办？",
+        risk_level="high"
+    )
+
+    issue_types = {issue["type"] for issue in result["issues"]}
+    assert not result["passed"], "危险表达应审查不通过"
+    assert "over_diagnosis" in issue_types, "应该发现过度诊断"
+    assert "dangerous_medication_advice" in issue_types, "应该发现危险用药建议"
+    assert result["fixed_suggestions"], "应该给出修正建议"
+
+    print(f"\n✅ 问题类型: {issue_types}")
+    print("✅ 测试 5.5 通过！")
+
+
+async def test_core_medical_skill_registration():
+    """测试 5.6: Agent 注册5个可调用核心医疗 Skill"""
+    print("\n" + "="*70)
+    print("测试 5.6: Agent 注册5个可调用核心医疗 Skill")
+    print("="*70)
+
+    discovered = discover_skills(project_root)
+    active = discover_active_skills(project_root, discovered)
+    loaded = load_all_skills(project_root)
+
+    assert len(discovered) == 5, f"磁盘上应发现5个 Agent Skill 目录，实际: {len(discovered)}"
+    assert len(active) == 5, f"实际可调用 Skill 应为5个，实际: {len(active)}"
+    assert len(loaded) == 5, f"load_all_skills 应加载5个 Agent Skill，实际: {len(loaded)}"
+    discovered_names = {item["function_name"] for item in discovered}
+    active_names = {item["function_name"] for item in active}
+    assert "search_medical_knowledge" not in discovered_names, "search_medical_knowledge 已移除，不应被发现"
+    assert "search_medical_knowledge" not in active_names, "search_medical_knowledge 已移除，不应为 active"
+
+    expected = {
+        "collect_clinical_context",
+        "assess_risk",
+        "analyze_symptoms",
+        "recommend_lifestyle",
+        "deep_research",
+    }
+
+    assert set(loaded.keys()) == expected, f"load_all_skills 结果不一致: {set(loaded.keys())}"
+
+    for agent_cls in (ConsultationAgent, DiagnosticAgent, ResearchAgent):
+        agent = agent_cls()
+        tool_names = set(agent.skill_registry.get_all().keys())
+        assert len(tool_names) == 5, f"{agent.agent_id} 应注册5个工具，实际: {len(tool_names)}"
+        assert tool_names == expected, f"{agent.agent_id} 工具集不一致: {tool_names}"
+        assert "search_medical_knowledge" not in tool_names, "已移除的知识检索 Skill 不应注册为可调用工具"
+        assert "safety_check" not in tool_names, "safety_check 是 runtime module，不应注册为可调用工具"
+
+    print(f"\n✅ discovered={len(discovered)}, active={len(active)}, load_all={len(loaded)}")
+    print(f"✅ 已注册工具: {sorted(expected)}")
+    print("✅ 测试 5.6 通过！")
 
 
 # ============================================================================
@@ -823,8 +905,6 @@ async def test_deep_research_evidence_synthesizer():
 
     from research.evidence_synthesizer import EvidenceSynthesizer
     from research.web_search import SearchResult
-    # Document 类已废弃，现在 Milvus 返回 Dict[str, Any]
-    # from research.knowledge_base import Document
 
     # 创建模拟搜索结果
     web_results = [
@@ -840,22 +920,11 @@ async def test_deep_research_evidence_synthesizer():
         ),
     ]
 
-    # 创建模拟知识库结果（Milvus 返回 dict 格式）
-    kb_results = [
-        {
-            "id": "doc1",
-            "content": "糖尿病诊疗指南（2024版）：2型糖尿病的治疗目标是控制血糖、预防并发症。",
-            "metadata": {"title": "糖尿病诊疗指南（2024版）"},
-            "score": 0.92
-        },
-    ]
-
     synthesizer = EvidenceSynthesizer()
 
     report = await synthesizer.synthesize(
         query="2型糖尿病的最新治疗方法",
-        web_results=web_results,
-        kb_results=kb_results
+        web_results=web_results
     )
 
     print(f"\n📊 研究报告:")
@@ -882,13 +951,13 @@ async def test_deep_research_tool_integration():
     agent = ResearchAgent()
 
     # 检查工具注册
-    tools = agent.tool_registry.get_all()
-    tool_names = [tool.name for tool in tools]
+    tools = agent.skill_registry.get_all()
+    tool_names = list(tools.keys())
 
     print(f"\n📋 已注册工具: {tool_names}")
 
-    assert "clinical_guideline" in tool_names, "应该有 clinical_guideline 工具"
     assert "deep_research" in tool_names, "应该有 deep_research 工具"
+    assert "search_medical_knowledge" not in tool_names, "search_medical_knowledge 已移除，不应注册"
 
     print(f"\n✅ ResearchAgent 有 {len(tools)} 个工具")
     print(f"✅ deep_research 工具已成功集成")
@@ -960,7 +1029,7 @@ async def test_deep_research_end_to_end():
 # Phase 6: Skills 集成测试（已通过 Phase 4 和 Phase 5 验证）
 # ============================================================================
 # 注：Phase 6 的测试已被 Phase 4-5 覆盖，Skills 已完全替代 Tools
-# - Phase 4: 测试了 recommend_lifestyle, clinical_guideline
+# - Phase 4: 测试了 collect_clinical_context, assess_risk, analyze_symptoms, recommend_lifestyle 和 SafetyGuard runtime rules
 # - Phase 5: 测试了 deep_research
 # 无需重复测试
 
@@ -1014,7 +1083,7 @@ async def test_unified_memory_single_agent():
     print(f"\n📊 第二轮短期记忆:")
     print(f"  - 总计: {len(messages2)} 条消息")
 
-    # 验证长期记忆（通过 Mem0 检索）
+    # 验证长期记忆接口（默认可能禁用）
     ltm = LongTermMemory()
     similar = ltm.search_similar_sessions("高血压", limit=5)
     print(f"\n🔍 长期记忆检索:")
@@ -1092,7 +1161,7 @@ async def test_harness_constraint_validator():
     validator = ConstraintValidator()
 
     # 测试工具调用验证
-    result = validator.validate_tool_call("consultation_agent", "search_knowledge")
+    result = validator.validate_tool_call("consultation_agent", "collect_clinical_context")
     assert result.get("valid"), "合法工具调用应该通过验证"
 
     # 测试输出验证
@@ -1178,23 +1247,8 @@ async def test_harness_integration():
 async def test_singleton_instances():
     """测试 7.3: 单例模式验证"""
     print("\n" + "="*70)
-    print("测试 7.3: 单例模式 - MedicalKnowledgeBase & ShortTermMemory")
+    print("测试 7.3: 单例模式 - ShortTermMemory")
     print("="*70)
-
-    # 测试 MedicalKnowledgeBase 单例
-    print("\n🔍 测试 MedicalKnowledgeBase 单例...")
-    from knowledge.milvus_kb import MedicalKnowledgeBase
-
-    kb1 = MedicalKnowledgeBase()
-    kb1_id = id(kb1)
-    print(f"  - 第一次实例化: id={kb1_id}")
-
-    kb2 = MedicalKnowledgeBase()
-    kb2_id = id(kb2)
-    print(f"  - 第二次实例化: id={kb2_id}")
-
-    assert kb1 is kb2, "MedicalKnowledgeBase 应该是单例"
-    print(f"✅ MedicalKnowledgeBase 单例验证通过")
 
     # 测试 ShortTermMemory 单例
     print("\n🔍 测试 ShortTermMemory 单例...")
@@ -1211,9 +1265,8 @@ async def test_singleton_instances():
     print(f"✅ ShortTermMemory 单例验证通过")
 
     print("\n✅ 测试 7.3 通过！")
-    print("  ✓ MedicalKnowledgeBase 单例生效")
     print("  ✓ ShortTermMemory 单例生效")
-    print("  ✓ 避免重复加载模型和重复初始化")
+    print("  ✓ 避免短期记忆重复初始化")
 
 
 async def test_memory_no_duplication():
@@ -1267,7 +1320,7 @@ async def main():
     """运行所有测试"""
     print("\n" + "🧪 "*35)
     print(" "*15 + "Medical-Agent-Swarm 完整测试套件")
-    print(" "*10 + "Phase 1-6: Agent Loop + Swarm + Memory + Tools + DeepResearch + Milvus")
+    print(" "*10 + "Phase 1-6: Agent Loop + Swarm + Memory + Medical Skills + DeepResearch")
     print("🧪 "*35 + "\n")
 
     tests = [
@@ -1281,11 +1334,14 @@ async def main():
         ("Phase 2: SessionSummary 生成", test_session_summary),
         ("Phase 2: 向后兼容性", test_backward_compatibility),
         ("Phase 3: 短期记忆", test_short_term_memory),
-        ("Phase 3: 长期记忆（Mem0）", test_long_term_memory),
+        ("Phase 3: 长期记忆接口", test_long_term_memory),
         ("Phase 3: 记忆系统集成", test_memory_integration),
-        ("Phase 4: 生活方式建议工具", test_recommend_lifestyle),
-        ("Phase 4: 疾病分类工具", test_disease_classification),
-        ("Phase 4: 临床指南检索工具", test_clinical_guidelines),
+        ("Phase 4: 问诊补全 Skill", test_collect_clinical_context),
+        ("Phase 4: 风险分诊规则", test_assess_risk_rules),
+        ("Phase 4: 症状分析规则", test_analyze_symptoms_rules),
+        ("Phase 4: 生活方式模板", test_recommend_lifestyle),
+        ("Phase 4: SafetyGuard runtime rules", test_safety_check),
+        ("Phase 4: 核心医疗 Skill 注册", test_core_medical_skill_registration),
         ("Phase 5: DeepResearch 证据综合器", test_deep_research_evidence_synthesizer),
         ("Phase 5: DeepResearch 工具集成", test_deep_research_tool_integration),
         ("Phase 5: DeepResearch 端到端测试", test_deep_research_end_to_end),
@@ -1299,6 +1355,14 @@ async def main():
         ("Phase 8: Harness 约束验证器", test_harness_constraint_validator),
         ("Phase 8: Harness 自动修复器", test_harness_auto_fixer),
         ("Phase 8: Harness 完整集成", test_harness_integration),
+        ("Phase 8: Runtime Safety Guard 自动执行", test_auto_safety_check_without_tool_call),
+        ("Phase 8: Runtime Safety Guard 危险用药", test_dangerous_medication_detected),
+        ("Phase 8: safety_check 工具过滤", test_safety_check_filtered_from_agent_tools),
+        ("Phase 8: safety_check 调用阻断", test_safety_check_tool_call_is_blocked),
+        ("Phase 8: Runtime Safety Guard 风险等级提取", test_risk_level_from_assess_risk_result),
+        ("Phase 8: Runtime Safety Guard 卒中 FAST", test_stroke_fast_emergency_warning),
+        ("Phase 8: Runtime Safety Guard 儿童过敏", test_child_allergy_emergency_warning),
+        ("Phase 8: Runtime Safety Guard 孕期高血压", test_pregnancy_hypertension_emergency_warning),
     ]
 
     passed = 0
@@ -1330,32 +1394,33 @@ async def main():
         print("\n已验证功能:")
         print("  ✅ Phase 1: Agent Loop 和工具调用")
         print("  ✅ Phase 2: SharedContext 和事件系统")
-        print("  ✅ Phase 2: Agent 能力匹配和任务认领")
+        print("  ✅ Phase 2: Agent 能力匹配和任务分配")
         print("  ✅ Phase 2: 智能路由（简单→单Agent，复杂→Swarm）")
         print("  ✅ Phase 2: 多Agent 并行协作")
         print("  ✅ Phase 2: SessionSummary 和持续学习")
         print("  ✅ Phase 2: 完全向后兼容")
         print("  ✅ Phase 3: 短期记忆（会话级对话历史）")
-        print("  ✅ Phase 3: 长期记忆（Mem0云服务）")
+        print("  ✅ Phase 3: 长期记忆接口")
         if context_aware:
             print("  ✅ Phase 3: 记忆系统端到端集成（多轮对话上下文正常）")
         else:
             print("  ⚠️  Phase 3: 记忆系统集成通过，但上下文利用需要进一步优化")
-        print("  ✅ Phase 4: 生活方式建议工具（ConsultationAgent）")
-        print("  ✅ Phase 4: 疾病分类与编码查询（使用 search_knowledge 兜底）")
-        print("  ✅ Phase 4: 临床指南检索工具（ResearchAgent）")
-        print("  ✅ Phase 5: DeepResearch 证据综合器（网络搜索+知识库+证据综合）")
+        print("  ✅ Phase 4: 问诊补全、风险分诊、症状分析")
+        print("  ✅ Phase 4: 生活方式模板和高危拒绝")
+        print("  ✅ Phase 4: SafetyGuard 运行时安全审查")
+        print("  ✅ Phase 4: Agent 注册5个核心医疗 Skills")
+        print("  ✅ Phase 5: DeepResearch 证据综合器（网络搜索+证据综合）")
         print("  ✅ Phase 5: DeepResearch 工具集成到 ResearchAgent")
         print("  ✅ Phase 5: DeepResearch 端到端测试（ResearchAgent 实际调用）")
-        print("  ✅ Skills 架构：6个原子 Skills 完全替代 Tools 层")
-        print("  ✅ Skills 集成：所有 Agent 注册全部6个 Skills")
+        print("  ✅ Skills 架构：5个可调用医疗 Skills + 运行时安全模块")
+        print("  ✅ Skills 集成：所有 Agent 注册全部5个核心医疗 Skills")
         print("  ✅ Skills 调用：Agent Loop 自主选择合适的 Skills")
-        print("  ✅ Milvus 知识库：语义检索支持所有相关 Skills")
         if HARNESS_AVAILABLE:
             print("  ✅ Phase 8: Harness Engineering（约束验证 + 自动修复）")
             print("  ✅ Harness 约束系统：工具调用验证、输出验证、任务分解验证")
             print("  ✅ Harness 自动修复：自动添加免责声明、高危警告")
             print("  ✅ Harness 集成：非侵入式注入到 Agent Loop")
+            print("  ✅ Runtime Safety Guard：最终回答强制安全审查")
         else:
             print("  ⚠️ Phase 8: Harness Engineering 模块未安装（可选功能）")
     else:

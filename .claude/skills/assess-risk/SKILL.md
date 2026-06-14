@@ -15,9 +15,9 @@ description: Assess symptom risk level (low/medium/high/emergency). Use when use
 
 ## 底层实现
 
-- 技术: 风险规则引擎 + Milvus 向量数据库
-- 数据源: 高风险症状规则库 + 医学知识库（RAG）
-- 增强: 从知识库检索风险相关的医学建议
+- 技术: 风险规则引擎
+- 数据源: 内置红旗症状、症状组合和特殊人群加权规则
+- 特点: 自包含规则实现，适合稳定风险分诊
 
 ## 调用方式
 

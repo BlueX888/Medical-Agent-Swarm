@@ -1,15 +1,12 @@
 """
-长期记忆：基于 Mem0 的跨会话记忆管理
+长期记忆：可选 Mem0 跨会话记忆管理
 
 功能：
 - 使用 Mem0 API 存储会话总结
 - 向量相似度搜索历史会话
 - 支持多用户和多 Agent
 
-Mem0 优势：
-- 自动向量化和相似度搜索
-- 云端或本地 Qdrant 存储
-- 内置去重和摘要
+Mem0 是可选增强能力；默认依赖不安装 mem0ai，缺失时本模块自动禁用。
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime
@@ -29,7 +26,7 @@ try:
     MEM0_AVAILABLE = True
 except ImportError:
     MEM0_AVAILABLE = False
-    logger.warning("mem0ai not installed. Long-term memory disabled. Install with: pip install mem0ai")
+    logger.info("mem0ai not installed. Optional long-term memory is disabled.")
 
 
 class LongTermMemory:
@@ -54,7 +51,7 @@ class LongTermMemory:
         """
         if not MEM0_AVAILABLE:
             self.enabled = False
-            logger.warning("Mem0 not available. Long-term memory disabled.")
+            logger.info("Mem0 not available. Long-term memory disabled.")
             return
 
         self.enabled = True
@@ -196,6 +193,5 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []
-
 
 

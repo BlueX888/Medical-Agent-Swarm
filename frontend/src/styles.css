@@ -1,0 +1,921 @@
+:root {
+  /* 全局基调：偏医疗调试台的低饱和浅背景和深色正文。 */
+  color: #17211c;
+  background: #eef2f3;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  letter-spacing: 0;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  letter-spacing: 0;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 页面骨架：顶部状态栏 + 下方三栏工作区。 */
+.app-shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+/* 顶部运行状态栏：承载 run 状态、路由、耗时、事件数和导出操作。 */
+.topbar {
+  min-height: 76px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  color: #f7fbf8;
+  background: #162b24;
+  border-bottom: 1px solid #0c1814;
+}
+
+.brand-block {
+  min-width: 240px;
+}
+
+.eyebrow {
+  color: #93c7ba;
+  font-size: 12px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 2px 0 0;
+  font-size: 24px;
+  font-weight: 780;
+}
+
+.status-strip {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+/* 顶部状态与指标胶囊：保持紧凑，适合横向扫读。 */
+.status-pill,
+.metric,
+  .icon-button,
+  .tab-button,
+  .template-row button,
+  .secondary-button,
+  .small-icon-button,
+  .text-button {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+}
+
+.status-pill {
+  min-width: 78px;
+  padding: 8px 9px;
+  text-align: center;
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 820;
+  background: #51605a;
+}
+
+.status-pill.success,
+.status-pill.ok {
+  background: #19704b;
+}
+
+.status-pill.failed,
+.status-pill.timeout {
+  background: #9b3732;
+}
+
+.status-pill.running {
+  background: #966916;
+}
+
+.metric {
+  min-height: 36px;
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #dce9df;
+  font-size: 12px;
+}
+
+.metric strong {
+  color: #ffffff;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-button,
+.small-icon-button {
+  display: inline-grid;
+  place-items: center;
+  color: #f7fbf8;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+}
+
+/* 主工作区：左侧输入，中间回答/时间线，右侧 Inspector。 */
+.workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(300px, 350px) minmax(420px, 1fr) minmax(430px, 560px);
+  gap: 10px;
+  padding: 10px;
+}
+
+/* 所有主要面板共用的边框、背景和阴影。 */
+.panel {
+  min-width: 0;
+  min-height: 0;
+  background: #fbfdfc;
+  border: 1px solid #ccd8d2;
+  border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(19, 36, 25, 0.07);
+}
+
+.input-panel,
+.inspector-panel,
+.main-column {
+  min-height: 0;
+}
+
+/* 左侧输入面板：使用内部滚动，保证长表单不挤压右侧观测区。 */
+.input-panel {
+  overflow: auto;
+  padding: 12px;
+}
+
+/* 面板标题与小标题，统一图标和文字的对齐方式。 */
+.panel-heading,
+.subheading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: #24382f;
+  font-size: 14px;
+  font-weight: 820;
+}
+
+.subheading {
+  margin: 16px 0 8px;
+  justify-content: space-between;
+}
+
+.subheading span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.subheading small {
+  color: #65786d;
+  font-size: 12px;
+}
+
+/* 表单控件：病例字段、Session ID 和各类开关。 */
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.field span,
+.toggle span {
+  color: #52655c;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  border: 1px solid #bdcbc4;
+  border-radius: 6px;
+  color: #142018;
+  background: #ffffff;
+  outline: none;
+}
+
+input,
+select {
+  height: 36px;
+  padding: 0 9px;
+}
+
+textarea {
+  min-height: 74px;
+  padding: 8px 9px;
+  resize: vertical;
+  line-height: 1.42;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #2f7654;
+  box-shadow: 0 0 0 3px rgba(47, 118, 84, 0.14);
+}
+
+/* 快捷模板按钮：只填充表单，不触发运行。 */
+.template-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.template-row button {
+  min-height: 34px;
+  padding: 6px 8px;
+  color: #173326;
+  background: #e8f0ea;
+  border-color: #c8d7ce;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.session-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 10px;
+}
+
+.session-field {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.secondary-button {
+  min-height: 36px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #234535;
+  background: #edf4ef;
+  border-color: #cbd9d1;
+  font-size: 12px;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.toggle-stack {
+  display: grid;
+  gap: 7px;
+  margin: 8px 0 12px;
+}
+
+.toggle {
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.toggle input {
+  width: 18px;
+  height: 18px;
+  accent-color: #2f7654;
+}
+
+/* 后端健康状态：只表示 API 连通性，不表示当前 run 是否成功。 */
+.api-health {
+  min-height: 32px;
+  margin-bottom: 10px;
+  padding: 7px 8px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #d6e1dc;
+  border-radius: 6px;
+  color: #465a50;
+  background: #f4f8f6;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.api-health.ok {
+  color: #176a43;
+  background: #edf8f1;
+}
+
+.api-health.failed {
+  color: #9b3732;
+  background: #fff1ef;
+}
+
+.primary-button {
+  width: 100%;
+  min-height: 42px;
+  border: 0;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #ffffff;
+  background: #26694a;
+  font-weight: 820;
+}
+
+/* 会话对话：把短期记忆按消息流展示，用于确认多轮追问是否沿用同一个 session。 */
+.conversation-section {
+  margin-top: 14px;
+  padding-top: 2px;
+  border-top: 1px solid #e0e9e4;
+}
+
+.session-summary {
+  min-width: 0;
+  margin-bottom: 8px;
+  padding: 7px 8px;
+  display: grid;
+  gap: 3px;
+  border: 1px solid #d9e3dc;
+  border-radius: 6px;
+  background: #f7faf8;
+}
+
+.session-summary span {
+  color: #63756a;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.session-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1d3025;
+  font-size: 12px;
+}
+
+.conversation-list {
+  display: grid;
+  gap: 7px;
+}
+
+.chat-message {
+  min-width: 0;
+  padding: 8px;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #d9e3dc;
+  border-left: 3px solid #7c8f84;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.chat-message.user {
+  border-left-color: #26694a;
+  background: #f6fbf8;
+}
+
+.chat-message.assistant {
+  border-left-color: #275f87;
+  background: #f6fafe;
+}
+
+.chat-message.tool {
+  border-left-color: #966916;
+  background: #fffaf0;
+}
+
+.chat-message.system {
+  border-left-color: #6a6476;
+  background: #faf8fc;
+}
+
+.chat-message-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-message-head strong,
+.chat-message-head time {
+  color: #52655c;
+  font-size: 11px;
+  font-weight: 780;
+}
+
+.chat-message pre {
+  max-height: 150px;
+  overflow: auto;
+}
+
+/* 错误提示：用于接口、轮询或 Memory 加载失败。 */
+.error-line {
+  margin: 8px 0 10px;
+  padding: 8px;
+  display: flex;
+  gap: 7px;
+  align-items: flex-start;
+  color: #842f2b;
+  background: #ffeceb;
+  border: 1px solid #f0b8b4;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* 运行历史：从后端内存 run store 读取，点击后恢复 run/events。 */
+.history-section {
+  border-top: 1px solid #e0e9e4;
+}
+
+.history-list {
+  display: grid;
+  gap: 6px;
+}
+
+.history-item {
+  min-width: 0;
+  padding: 8px;
+  display: grid;
+  gap: 3px;
+  border: 1px solid #d9e3dc;
+  border-radius: 6px;
+  text-align: left;
+  background: #ffffff;
+}
+
+.history-item strong,
+.history-item span,
+.history-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item strong {
+  color: #22352a;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.history-item span,
+.history-item small {
+  color: #63756a;
+  font-size: 12px;
+}
+
+/* 中间列：上方最终回答，下方事件时间线。 */
+.main-column {
+  display: grid;
+  grid-template-rows: minmax(210px, 0.8fr) minmax(320px, 1.2fr);
+  gap: 10px;
+}
+
+.answer-panel,
+.timeline-panel {
+  overflow: hidden;
+  padding: 12px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+}
+
+.answer-body,
+.timeline,
+.inspector-section {
+  min-height: 0;
+  overflow: auto;
+}
+
+.answer-body {
+  border: 1px solid #dde6df;
+  border-radius: 6px;
+  background: #f8faf8;
+  padding: 11px;
+}
+
+/* 代码和 JSON 输出统一使用等宽字体，保留换行与嵌套结构。 */
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.48;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.muted,
+.empty-row {
+  color: #6d7e74;
+  font-size: 13px;
+}
+
+.timeline {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+/* 时间线事件：紧凑态显示摘要，展开态显示 Input/Output/Metadata。 */
+.timeline-event {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px 28px 1fr;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid #d9e3dc;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.timeline-event.failed {
+  border-color: #edbbb5;
+  background: #fff7f6;
+}
+
+.event-toggle {
+  width: 24px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  color: #465a50;
+  background: transparent;
+}
+
+.event-marker {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #2f7654;
+}
+
+.timeline-event.failed .event-marker {
+  background: #a33a34;
+}
+
+.event-content {
+  min-width: 0;
+}
+
+.event-title,
+.event-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.event-title strong {
+  color: #1c2b21;
+}
+
+.event-title span,
+.event-meta span {
+  color: #64766a;
+  font-size: 12px;
+}
+
+.event-error {
+  margin-top: 6px;
+  color: #8a2d29;
+  font-size: 12px;
+}
+
+.event-details {
+  margin-top: 9px;
+  display: grid;
+  gap: 8px;
+}
+
+/* 事件详情里的复制按钮，主要用于单条 trace 的复盘和分享。 */
+.detail-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.text-button {
+  min-height: 30px;
+  padding: 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #234535;
+  background: #edf4ef;
+  border-color: #cbd9d1;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+/* 右侧 Inspector：多 Tab 高密度展示同一批 trace 的不同视角。 */
+.inspector-panel {
+  padding: 9px;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 9px;
+}
+
+/* Inspector Tab：固定九个视角，窄屏时会自动折叠为单列。 */
+.tab-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.tab-row.wide {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.tab-button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 5px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: #304639;
+  background: #edf4ef;
+  border-color: #cfdbd2;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.tab-button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-button.active {
+  color: #ffffff;
+  background: #26694a;
+  border-color: #26694a;
+}
+
+/* Inspector 内容区：所有 Tab 使用同一套纵向间距和内部滚动。 */
+.inspector-section {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+/* 指标网格、卡片和 JSON 区块的基础视觉容器。 */
+.summary-grid,
+.agent-card,
+.data-card,
+.json-section {
+  border: 1px solid #d9e3dc;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  overflow: hidden;
+}
+
+.summary-grid > div {
+  min-width: 0;
+  padding: 9px;
+  display: grid;
+  gap: 3px;
+  border-right: 1px solid #e7eee9;
+  border-bottom: 1px solid #e7eee9;
+}
+
+.summary-grid span,
+.agent-card span {
+  color: #63756a;
+  font-size: 12px;
+}
+
+.summary-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1d3025;
+  font-size: 13px;
+}
+
+/* Timeline Tab 的筛选器：stage、agent、skill、status 和全文搜索。 */
+.filter-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.filter-select,
+.search-box {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.filter-select select,
+.search-box input {
+  min-width: 0;
+  height: 34px;
+  font-size: 12px;
+}
+
+.search-box {
+  grid-column: 1 / -1;
+}
+
+/* Agent/Skill/LLM 等 Tab 内的列表卡片。 */
+.card-list,
+.agent-list {
+  display: grid;
+  gap: 9px;
+}
+
+.data-card,
+.agent-card {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.agent-card-main,
+.card-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-card-main > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.agent-card-main strong,
+.card-title-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #1e3227;
+}
+
+.card-description {
+  margin: 0;
+  color: #52655c;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* Agent 能力标签，展示静态能力而非运行时事件。 */
+.capability-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.capability-row span {
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #244332;
+  background: #e5efe8;
+  font-size: 12px;
+}
+
+/* JSON 折叠区：用按钮作为标题，下面展示格式化后的原始对象。 */
+.json-section {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.json-section > button {
+  width: 100%;
+  min-height: 32px;
+  padding: 7px 9px;
+  border: 0;
+  border-bottom: 1px solid #e7eee9;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #41564a;
+  background: #f4f8f5;
+  text-align: left;
+  font-size: 12px;
+  font-weight: 820;
+}
+
+.json-block {
+  max-height: 380px;
+  overflow: auto;
+  padding: 10px;
+  background: #ffffff;
+}
+
+/* 成功/失败颜色语义，在各类表格、卡片和事件行中复用。 */
+.good {
+  color: #176a43 !important;
+  font-weight: 780;
+}
+
+.bad {
+  color: #a33a34 !important;
+  font-weight: 780;
+}
+
+/* 中等屏幕：右侧 Inspector 下移为整行，保留输入和主内容两列。 */
+@media (max-width: 1320px) {
+  .workspace {
+    grid-template-columns: 330px 1fr;
+  }
+
+  .inspector-panel {
+    grid-column: 1 / -1;
+    min-height: 520px;
+  }
+}
+
+/* 小屏幕：所有区域单列排列，保证移动端也能查看完整日志。 */
+@media (max-width: 860px) {
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .status-strip {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .main-column {
+    grid-template-rows: auto auto;
+  }
+
+  .template-row,
+  .field-grid,
+  .session-row,
+  .tab-row,
+  .tab-row.wide,
+  .summary-grid,
+  .filter-bar {
+    grid-template-columns: 1fr;
+  }
+}

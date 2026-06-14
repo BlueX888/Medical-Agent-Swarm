@@ -16,7 +16,7 @@ setup(
     description="Multi-agent medical assistant system with swarm intelligence",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/...",
+    url="https://github.com/BlueX888/Medical-Agent-Swarm",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",

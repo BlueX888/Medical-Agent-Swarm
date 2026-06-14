@@ -1,7 +1,6 @@
 """
 Deep Research Skill
-深度研究 Skill（依赖 RAG 知识库 + Web Search）
-整合网络搜索和 Milvus 医学知识库进行深度研究
+深度研究 Skill（依赖 Web Search + 证据综合）
 """
 from typing import Dict, Any
 from loguru import logger
@@ -40,9 +39,8 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
         # 执行研究
         # 注意：DeepResearchWorkflow.run() 返回的是 ResearchReport 对象，不是 dict
         report = await workflow.run(
-            question=query,  # 参数名是 question，不是 query
-            max_web_results=max_iterations * 5,  # 使用 max_iterations 控制搜索结果数
-            max_kb_results=max_iterations * 3
+            question=query,
+            max_web_results=max_iterations * 5
         )
 
         # report 是 ResearchReport 对象，有以下属性：
@@ -60,7 +58,7 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "sources": len(report.sources),
             "evidence_level": report.evidence_level,
             "status": "completed",
-            "data_sources": "Web Search + Milvus RAG + Evidence Synthesis"
+            "data_sources": "Web Search + Evidence Synthesis"
         }
 
     except Exception as e:
@@ -121,7 +119,7 @@ def format_research_report(query: str, report) -> str:
     if report.sources:
         output.append(f"\n参考来源数量：{len(report.sources)}")
 
-    output.append("\n💡 数据来源：网络搜索 + 医学知识库（Milvus RAG）+ 证据综合")
+    output.append("\n💡 数据来源：网络搜索 + 证据综合")
 
     return "\n".join(output)
 

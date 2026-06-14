@@ -18,19 +18,9 @@ Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的�
 
 ## 工作流程
 
-```text
-用户问题
-   |
-   v
-MedicalSwarmGraph
-   |
-   +-- ConsultationAgent
-   +-- DiagnosticAgent
-   +-- ResearchAgent
-   |
-   v
-结果综合 -> 安全检查 -> 最终回答
-```
+![LangGraph 医疗多智能体系统流程图](assets/system-workflow.png)
+
+LangGraph 负责加载会话记忆、规划并路由任务、调度单 Agent 或多 Agent 协作，以及完成结果综合、安全检查和记忆保存。
 
 当前内置的主要 Skill：
 

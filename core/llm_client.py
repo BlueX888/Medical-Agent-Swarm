@@ -3,7 +3,6 @@ LLM客户端
 支持调用 OpenAI 兼容的 API（如字节跳动豆包、OpenAI、Deepseek 等）
 支持 function calling
 """
-import sys
 import asyncio
 import json
 from typing import List, Dict, Any, Optional
@@ -11,10 +10,11 @@ from dataclasses import dataclass
 from openai import AsyncOpenAI
 from loguru import logger
 
-import os
-# 加载项目根目录的 config.py
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import LLM_CONFIG
+try:
+    from config import LLM_CONFIG
+except ImportError:
+    LLM_CONFIG = {}
+from core.observability import trace_async
 
 
 @dataclass
@@ -111,12 +111,33 @@ class LLMClient:
                     },
                 )
 
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                **kwargs
+            request_params = {
+                "model": self.model_name,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                **kwargs,
+            }
+
+            response = await trace_async(
+                name=trace_name,
+                run_type="llm",
+                func=lambda: self.client.chat.completions.create(**request_params),
+                inputs={
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                metadata=self._langsmith_metadata(
+                    trace_name=trace_name,
+                    agent_id=agent_id,
+                    debug_collector=debug_collector,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools_count=0,
+                ),
+                tags=["medical-agent-swarm", "llm"],
+                output_mapper=self._response_trace_output,
             )
 
             content = response.choices[0].message.content
@@ -252,7 +273,29 @@ class LLMClient:
                     },
                 )
 
-            response = await self.client.chat.completions.create(**request_params)
+            response = await trace_async(
+                name=trace_name,
+                run_type="llm",
+                func=lambda: self.client.chat.completions.create(**request_params),
+                inputs={
+                    "messages": messages,
+                    "tools": tools or [],
+                    "tool_choice": tool_choice,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+                metadata=self._langsmith_metadata(
+                    trace_name=trace_name,
+                    agent_id=agent_id,
+                    debug_collector=debug_collector,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    tools_count=len(tools or []),
+                    tool_choice=tool_choice,
+                ),
+                tags=["medical-agent-swarm", "llm", "tools"],
+                output_mapper=self._response_trace_output,
+            )
 
             # 解析响应
             message = response.choices[0].message
@@ -350,3 +393,55 @@ class LLMClient:
                 if not key.startswith("_")
             }
         return {}
+
+    def _langsmith_metadata(
+        self,
+        *,
+        trace_name: str,
+        agent_id: Optional[str],
+        debug_collector: Optional[Any],
+        temperature: float,
+        max_tokens: int,
+        tools_count: int,
+        tool_choice: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "trace_name": trace_name,
+            "agent_id": agent_id,
+            "model_type": self.model_type,
+            "tools_count": tools_count,
+            "tool_choice": tool_choice,
+            "ls_provider": "openai-compatible",
+            "ls_model_name": self.model_name,
+            "ls_model_type": "chat",
+            "ls_temperature": temperature,
+            "ls_max_tokens": max_tokens,
+        }
+        if debug_collector:
+            run = debug_collector.get_run()
+            metadata["session_id"] = run.session_id
+            metadata["debug_run_id"] = run.run_id
+        return metadata
+
+    def _response_trace_output(self, response: Any) -> Dict[str, Any]:
+        choices = getattr(response, "choices", []) or []
+        first_choice = choices[0] if choices else None
+        message = getattr(first_choice, "message", None) if first_choice else None
+        tool_calls = []
+        if message and getattr(message, "tool_calls", None):
+            tool_calls = [
+                {
+                    "id": tool_call.id,
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                }
+                for tool_call in message.tool_calls
+            ]
+        return {
+            "content": getattr(message, "content", None) if message else None,
+            "tool_calls": tool_calls,
+            "finish_reason": getattr(first_choice, "finish_reason", None),
+            "usage": self._usage_to_dict(getattr(response, "usage", None)),
+            "model": getattr(response, "model", self.model_name),
+            "response_id": getattr(response, "id", None),
+        }

@@ -10,9 +10,8 @@ import inspect
 from typing import Dict, Any, List, Optional
 from loguru import logger
 
-from .state_manager import StateManager, TaskStatus
+from .state_manager import TaskStatus, AgentState
 from .llm_client import LLMResponse
-from .safety_guard import SafetyGuard
 
 # Harness Engineering: runtime behavior constraints
 try:
@@ -43,14 +42,12 @@ class AgentLoop:
         Args:
             max_iterations: 最大迭代次数（防止无限循环）
             short_term_memory: 短期记忆管理器（可选）
-            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认4次）
+            max_tool_calls: 最大 Skill 调用次数（硬性限制，默认4次；可通过 Agent 类型覆盖）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
-        self.state_manager = StateManager()
         self.short_term_memory = short_term_memory
         self.tool_call_count = 0
-        self.safety_guard = SafetyGuard()
 
         # Harness Engineering: runtime behavior constraint validator
         self.validator = ConstraintValidator() if CONSTRAINTS_ENABLED else None
@@ -134,7 +131,7 @@ class AgentLoop:
                 input=loop_input_data,
                 name="agent_loop",
             )
-        state = self.state_manager.create_state(
+        state = AgentState(
             task_id=task_id,
             agent_id=agent.agent_id,
             input_data=loop_input_data,
@@ -412,15 +409,6 @@ class AgentLoop:
                         # Final-answer content safety is centralized in SafetyGuard.
                         final_answer = llm_response.content
 
-                        safety_result = await self._run_safety_guard(
-                            final_answer,
-                            original_user_message,
-                            latest_risk_level,
-                            debug_collector=debug_collector,
-                            agent_id=agent.agent_id,
-                        )
-                        final_answer = safety_result["answer"]
-
                         # 记录最终回答到短期记忆
                         if self.short_term_memory and session_id:
                             self.short_term_memory.add_message(
@@ -434,9 +422,9 @@ class AgentLoop:
                             'answer': final_answer,
                             'iterations': state.iteration,
                             'agent_id': agent.agent_id,
-                            'safety_checked': safety_result["safety_checked"],
-                            'safety_passed': safety_result["safety_passed"],
-                            'safety_issues': safety_result["safety_issues"],
+                            'safety_checked': False,
+                            'safety_passed': False,
+                            'safety_issues': [],
                         }
 
                         # 让 Agent 进行结果后处理（如提取建议等）
@@ -478,21 +466,14 @@ class AgentLoop:
                     )
 
                     final_answer = final_response.content or '抱歉，未能完成任务'
-                    safety_result = await self._run_safety_guard(
-                        final_answer,
-                        original_user_message,
-                        latest_risk_level,
-                        debug_collector=debug_collector,
-                        agent_id=agent.agent_id,
-                    )
 
                     result = {
-                        'answer': safety_result["answer"],
+                        'answer': final_answer,
                         'iterations': state.iteration,
                         'warning': 'max_iterations_reached',
-                        'safety_checked': safety_result["safety_checked"],
-                        'safety_passed': safety_result["safety_passed"],
-                        'safety_issues': safety_result["safety_issues"],
+                        'safety_checked': False,
+                        'safety_passed': False,
+                        'safety_issues': [],
                     }
 
                     # 记录最终回答到短期记忆
@@ -609,40 +590,3 @@ class AgentLoop:
                 return str(data["risk_level"])
 
         return ""
-
-    async def _run_safety_guard(
-        self,
-        final_answer: str,
-        original_question: str,
-        risk_level: str,
-        debug_collector: Optional[Any] = None,
-        agent_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Run mandatory runtime safety review for the final answer."""
-        timer = None
-        if debug_collector:
-            timer = debug_collector.time_event(
-                "safety_check",
-                agent_id=agent_id,
-                input={
-                    "answer": final_answer or "",
-                    "question": original_question or "",
-                    "risk_level": risk_level or "",
-                },
-                name="agent_loop_safety_guard",
-            )
-
-        safety_result = await self.safety_guard.review(
-            response=final_answer or "",
-            original_question=original_question or "",
-            risk_level=risk_level or "",
-        )
-        if timer:
-            timer.finish(
-                output=safety_result,
-                status="success" if safety_result.get("safety_passed") else "failed",
-                error=None if safety_result.get("safety_checked") else "safety_check_failed",
-            )
-        if not safety_result.get("safety_passed"):
-            logger.warning(f"Runtime safety guard found issues: {safety_result.get('safety_issues')}")
-        return safety_result

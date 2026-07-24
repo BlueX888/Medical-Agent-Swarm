@@ -26,6 +26,8 @@ class SkillRegistryMixin:
         Skills 会从 .claude/skills/ 目录自动发现，
         无需手动维护列表
         """
+        allowed = getattr(self, 'allowed_skill_names', None)
+
         project_root = Path(__file__).parent.parent
         discovered = discover_skills(project_root)
         active = discover_active_skills(project_root, discovered)
@@ -36,6 +38,10 @@ class SkillRegistryMixin:
             function_name = skill_info["function_name"]
             metadata = skill_info["metadata"]
             func = skill_info["function"]
+
+            if allowed is not None and function_name not in allowed:
+                logger.debug(f"Skipping skill {function_name} (not in allowed list for {self.__class__.__name__})")
+                continue
 
             # 从 metadata 获取描述
             description = metadata.get("description", f"Skill: {skill_info['name']}")

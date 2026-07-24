@@ -10,10 +10,14 @@ from loguru import logger
 
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from core import LLMClient
+from core.observability import trace_async
 from debug import DebugTraceCollector
 from memory import LongTermMemory, SessionSummaryManager, ShortTermMemory
 
 from .medical_swarm_graph import MedicalSwarmGraph
+
+_graph_cache: Dict[str, Any] = {}
+_default_coordinator: Optional["SwarmCoordinator"] = None
 
 
 class SwarmCoordinator:
@@ -24,11 +28,19 @@ class SwarmCoordinator:
         llm_client: Optional[LLMClient] = None,
         enable_swarm: bool = True,
         enable_memory: bool = True,
+        enable_short_term_memory: Optional[bool] = None,
+        enable_long_term_memory: Optional[bool] = None,
         swarm_timeout_s: float = 120.0,
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
-        self.enable_memory = enable_memory
+        # Backward compatibility: enable_memory sets both if not overridden
+        if enable_short_term_memory is None:
+            enable_short_term_memory = enable_memory
+        if enable_long_term_memory is None:
+            enable_long_term_memory = enable_memory
+        self.enable_short_term_memory = enable_short_term_memory
+        self.enable_long_term_memory = enable_long_term_memory
         self.swarm_timeout_s = swarm_timeout_s
 
         self.consultation_agent = ConsultationAgent()
@@ -47,28 +59,38 @@ class SwarmCoordinator:
 
         for worker in self.worker_pool:
             if hasattr(worker, "loop"):
-                worker.loop.short_term_memory = self.short_term_memory if enable_memory else None
+                worker.loop.short_term_memory = self.short_term_memory if enable_short_term_memory else None
 
-        self.medical_graph = MedicalSwarmGraph(
-            llm_client=self.llm_client,
-            worker_pool=self.worker_pool,
-            consultation_agent=self.consultation_agent,
-            diagnostic_agent=self.diagnostic_agent,
-            research_agent=self.research_agent,
-            short_term_memory=self.short_term_memory,
-            long_term_memory=self.long_term_memory,
-            session_manager=self.session_manager,
-            enable_swarm=self.enable_swarm,
-            enable_memory=self.enable_memory,
-            swarm_timeout=self.swarm_timeout_s,
-        )
+        # Graph caching: reuse MedicalSwarmGraph when config matches
+        cache_key = self._cache_key()
+        if cache_key in _graph_cache:
+            self.medical_graph = _graph_cache[cache_key]
+            logger.debug(f"Reusing cached MedicalSwarmGraph (key={cache_key[:16]}...)")
+        else:
+            self.medical_graph = MedicalSwarmGraph(
+                llm_client=self.llm_client,
+                worker_pool=self.worker_pool,
+                consultation_agent=self.consultation_agent,
+                diagnostic_agent=self.diagnostic_agent,
+                research_agent=self.research_agent,
+                short_term_memory=self.short_term_memory,
+                long_term_memory=self.long_term_memory,
+                session_manager=self.session_manager,
+                enable_swarm=self.enable_swarm,
+                enable_memory=self.enable_short_term_memory or self.enable_long_term_memory,
+                swarm_timeout=self.swarm_timeout_s,
+            )
+            _graph_cache[cache_key] = self.medical_graph
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
         logger.info(
             "Memory system: "
-            f"short_term={self.short_term_memory.storage_type}, "
-            f"long_term={'enabled' if self.long_term_memory.enabled else 'disabled'}"
+            f"short_term={'enabled' if self.enable_short_term_memory else 'disabled'}, "
+            f"long_term={'enabled' if self.enable_long_term_memory else 'disabled'}"
         )
+
+    def _cache_key(self) -> str:
+        return f"{id(self.llm_client)}:{self.enable_swarm}:{self.enable_short_term_memory}:{self.enable_long_term_memory}:{self.swarm_timeout_s}"
 
     def _get_agent_by_id(self, agent_id: str):
         """Compatibility helper for tests or internal callers."""
@@ -104,8 +126,44 @@ class SwarmCoordinator:
         if debug_collector:
             initial_state["debug_collector"] = debug_collector
 
-        state = await self.medical_graph.ainvoke(initial_state)
+        state = await trace_async(
+            name="medical_swarm_request",
+            run_type="chain",
+            func=lambda: self.medical_graph.ainvoke(initial_state),
+            inputs={
+                "question": question,
+                "context": context or {},
+                "session_id": session_id,
+                "enable_swarm": self.enable_swarm,
+                "enable_short_term_memory": self.enable_short_term_memory,
+                "enable_long_term_memory": self.enable_long_term_memory,
+                "swarm_timeout_s": swarm_timeout_s or self.swarm_timeout_s,
+            },
+            metadata={
+                "session_id": session_id,
+                "enable_swarm": self.enable_swarm,
+                "enable_short_term_memory": self.enable_short_term_memory,
+                "enable_long_term_memory": self.enable_long_term_memory,
+                "swarm_timeout_s": swarm_timeout_s or self.swarm_timeout_s,
+                "worker_count": len(self.worker_pool),
+            },
+            tags=["medical-agent-swarm", "request"],
+            output_mapper=self._trace_result_summary,
+        )
         return state["result"]
+
+    def _trace_result_summary(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        result = state.get("result") or {}
+        return {
+            "session_id": state.get("session_id") or result.get("session_id"),
+            "route": state.get("route") or state.get("mode"),
+            "swarm_enabled": result.get("swarm_enabled"),
+            "timeout_occurred": result.get("timeout_occurred"),
+            "agents_involved": result.get("agents_involved", []),
+            "answer": result.get("answer"),
+            "safety_checked": result.get("safety_checked"),
+            "safety_passed": result.get("safety_passed"),
+        }
 
 
 async def process_with_swarm(
@@ -120,6 +178,7 @@ async def process_with_swarm(
     """
     Convenience function for processing a question through the swarm entry.
     """
+    global _default_coordinator
     debug_collector = (
         DebugTraceCollector(
             question=question,
@@ -134,7 +193,19 @@ async def process_with_swarm(
         if debug
         else None
     )
-    coordinator = SwarmCoordinator(enable_swarm=enable_swarm, enable_memory=enable_memory)
+
+    # Reuse cached coordinator when called with default params
+    if (
+        _default_coordinator is not None
+        and _default_coordinator.enable_swarm == enable_swarm
+        and _default_coordinator.enable_short_term_memory == enable_memory
+        and _default_coordinator.enable_long_term_memory == enable_memory
+    ):
+        coordinator = _default_coordinator
+    else:
+        coordinator = SwarmCoordinator(enable_swarm=enable_swarm, enable_memory=enable_memory)
+        if enable_swarm and enable_memory:
+            _default_coordinator = coordinator
 
     try:
         result = await coordinator.process(

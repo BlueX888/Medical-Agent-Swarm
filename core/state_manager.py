@@ -1,6 +1,8 @@
 """
 状态管理器
 管理Agent执行过程中的状态
+
+# AgentState and TaskStatus are imported by agent_loop.py — remove file when all references cleaned
 """
 from typing import Dict, Any, List, Optional
 from datetime import datetime

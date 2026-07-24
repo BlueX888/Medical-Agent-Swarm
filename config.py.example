@@ -18,3 +18,10 @@ MEM0_CONFIG = {
 #     "port": 6379,
 #     "db": 0,
 # }
+
+# LangSmith observability is configured with environment variables:
+#   LANGSMITH_TRACING=true
+#   LANGSMITH_API_KEY=lsv2_...
+#   LANGSMITH_PROJECT=medical-agent-swarm
+# Medical text is redacted by default before being sent to LangSmith.
+# Set LANGSMITH_REDACT_MEDICAL_TEXT=false only in safe, non-PHI test data.

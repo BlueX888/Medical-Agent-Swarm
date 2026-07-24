@@ -444,6 +444,7 @@ class WebSearchTool:
 
     @staticmethod
     def _dedupe_strings(values: Iterable[str]) -> List[str]:
+        """Deduplicate strings by case-insensitive normalized form (public utility)."""
         seen = set()
         deduped = []
         for value in values:
@@ -453,6 +454,19 @@ class WebSearchTool:
                 continue
             seen.add(key)
             deduped.append(normalized)
+        return deduped
+
+    @staticmethod
+    def dedupe_results(results: List[SearchResult]) -> List[SearchResult]:
+        """Deduplicate search results by URL (public utility method)."""
+        deduped: List[SearchResult] = []
+        seen_urls: set = set()
+        for result in results:
+            normalized_url = result.url.rstrip("/")
+            if not normalized_url or normalized_url in seen_urls:
+                continue
+            seen_urls.add(normalized_url)
+            deduped.append(result)
         return deduped
 
     @staticmethod
@@ -469,23 +483,30 @@ class WebSearchTool:
         ]
 
     @staticmethod
+    def _build_search_plan_lazy(
+        queries: List[str],
+        regions: List[str],
+        backends: List[str]
+    ) -> Iterable[Tuple[str, str, str]]:
+        """Lazily generate search plan combinations instead of pre-building full list."""
+        # First: preferred query with each region/backend
+        for candidate_query in queries:
+            yield (candidate_query, regions[0], backends[0])
+        # Then: remaining combinations
+        for candidate_query in queries:
+            for candidate_region in regions:
+                for backend in backends:
+                    item = (candidate_query, candidate_region, backend)
+                    if (candidate_query, regions[0], backends[0]) != item:
+                        yield item
+
+    @staticmethod
     def _build_search_plan(
         queries: List[str],
         regions: List[str],
         backends: List[str]
     ) -> List[Tuple[str, str, str]]:
-        plan = []
-
-        for candidate_query in queries:
-            plan.append((candidate_query, regions[0], backends[0]))
-
-        for candidate_query in queries:
-            for candidate_region in regions:
-                for backend in backends:
-                    item = (candidate_query, candidate_region, backend)
-                    if item not in plan:
-                        plan.append(item)
-        return plan
+        return list(WebSearchTool._build_search_plan_lazy(queries, regions, backends))
 
     def filter_by_domain(
         self,

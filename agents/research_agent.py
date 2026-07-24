@@ -43,6 +43,9 @@ class ResearchAgent(BaseAgent, SkillRegistryMixin):
 
         super().__init__(agent_id, config, llm_client)
 
+        # 允许注册的 Skills（白名单过滤）
+        self.allowed_skill_names = ["deep_research", "collect_clinical_context"]
+
         # 设置能力标签
         self.set_capabilities([
             "literature_search",

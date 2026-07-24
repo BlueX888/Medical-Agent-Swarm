@@ -113,14 +113,6 @@ class SharedContext:
         # 工作记忆池（临时数据）
         self.memory_pool: Dict[str, Any] = {}
 
-    def publish_event(self, event: Event):
-        """
-        发布事件
-
-        Agent 通过发布事件来通知其他 Agent
-        """
-        self.events.append(event)
-
     def get_events(
         self,
         event_type: Optional[EventType] = None,
@@ -149,17 +141,6 @@ class SharedContext:
         """添加子任务"""
         self.task_decomposition[subtask.id] = subtask
 
-        # 发布事件
-        self.publish_event(Event(
-            type=EventType.TASK_DECOMPOSED,
-            source_agent="medical_swarm_graph",
-            data={
-                "subtask_id": subtask.id,
-                "type": subtask.type,
-                "assigned_agent": subtask.assigned_agent
-            }
-        ))
-
     def get_subtask(self, subtask_id: str) -> Optional[SubTask]:
         """获取子任务"""
         return self.task_decomposition.get(subtask_id)
@@ -187,14 +168,6 @@ class SharedContext:
 
         try:
             subtask.start()
-
-            # 发布事件
-            self.publish_event(Event(
-                type=EventType.SUBTASK_STARTED,
-                source_agent=subtask.assigned_agent,
-                data={"subtask_id": subtask_id}
-            ))
-
             return True
         except ValueError:
             return False
@@ -225,16 +198,6 @@ class SharedContext:
             confidence=confidence
         )
         self.agent_contributions[agent_id].append(contribution)
-
-        # 发布事件
-        self.publish_event(Event(
-            type=EventType.SUBTASK_COMPLETED,
-            source_agent=agent_id,
-            data={
-                "subtask_id": subtask_id,
-                "result_summary": str(result)[:200]  # 简短摘要
-            }
-        ))
 
     def get_contributions(
         self,
@@ -278,13 +241,6 @@ class SharedContext:
     def set_data(self, key: str, value: Any):
         """设置共享数据"""
         self.data[key] = value
-
-        # 发布事件
-        self.publish_event(Event(
-            type=EventType.CONTEXT_UPDATED,
-            source_agent="system",
-            data={"key": key}
-        ))
 
     def get_data(self, key: str, default: Any = None) -> Any:
         """获取共享数据"""

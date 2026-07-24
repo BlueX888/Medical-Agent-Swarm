@@ -14,14 +14,11 @@ from .short_term import (
 from .long_term import (
     LongTermMemory
 )
+from .evidence_cache import (
+    EvidenceMemory
+)
 
 # 本地 Markdown 持久化
-from .agent_identity import (
-    AgentIdentity,
-    AgentIdentityManager,
-    CollaborationRecord,
-    ToolUsageStats
-)
 from .session_summary import (
     SessionSummary,
     SessionSummaryManager,
@@ -36,12 +33,8 @@ __all__ = [
     'ShortTermMemory',
     'ConversationHistory',
     'LongTermMemory',
+    'EvidenceMemory',
     # 本地持久化类
-    'AgentIdentity',
-    'AgentIdentityManager',
-    'LearningRecord',
-    'CollaborationRecord',
-    'ToolUsageStats',
     'SessionSummary',
     'SessionSummaryManager',
     'AgentParticipation',

@@ -12,10 +12,7 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 from loguru import logger
 import os
-import sys
 
-# 加载项目根目录的 config.py
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from config import MEM0_CONFIG
 except ImportError:

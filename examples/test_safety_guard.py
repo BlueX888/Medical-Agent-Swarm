@@ -88,20 +88,18 @@ async def run_fake_agent(question: str, answer: str) -> Dict[str, Any]:
 async def test_auto_safety_check_without_tool_call():
     result = await run_fake_agent("胸痛伴呼吸困难怎么办？", "建议先休息观察。")
 
-    assert result["safety_checked"] is True
-    assert result["safety_passed"] is False
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
-    assert "120" in result["answer"] or "急诊" in result["answer"]
+    # SafetyGuard is now centralized in MedicalSwarmGraph.build_response.
+    # AgentLoop no longer runs safety review; it returns neutral defaults.
+    assert result["safety_checked"] is False
+    assert result["answer"] == "建议先休息观察。"
 
 
 async def test_dangerous_medication_detected():
     result = await run_fake_agent("血压高怎么办？", "你就是高血压，自行加药即可，不用去医院。")
 
-    issue_types = {issue["type"] for issue in result["safety_issues"]}
-    assert "dangerous_medication_advice" in issue_types
-    assert "over_diagnosis" in issue_types
-    assert "不要自行加药" in result["answer"]
-    assert "诊断边界" in result["answer"]
+    # AgentLoop no longer runs SafetyGuard — answer passes through as-is.
+    assert result["safety_checked"] is False
+    assert "就是" in result["answer"] or "自行加药" in result["answer"]
 
 
 async def test_final_answer_skips_constraint_output_validation():
@@ -113,8 +111,7 @@ async def test_final_answer_skips_constraint_output_validation():
 
     result = await loop.run(agent, {"question": "胸痛怎么办？"})
 
-    assert result["safety_checked"] is True
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
+    assert result["safety_checked"] is False
 
 
 async def test_safety_check_filtered_from_agent_tools():
@@ -147,8 +144,7 @@ async def test_safety_check_tool_call_is_blocked():
     loop = AgentLoop(max_iterations=3)
     result = await loop.run(agent, {"question": "胸痛怎么办？"})
 
-    assert result["safety_checked"] is True
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
+    assert result["safety_checked"] is False
 
 
 async def test_risk_level_from_assess_risk_result():
@@ -172,28 +168,23 @@ async def test_risk_level_from_assess_risk_result():
     loop = AgentLoop(max_iterations=3)
     result = await loop.run(agent, {"question": "胸痛，呼吸困难"})
 
-    assert result["safety_checked"] is True
-    assert result["safety_passed"] is False
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
-    assert "120" in result["answer"] or "急诊" in result["answer"]
+    assert result["safety_checked"] is False
+    assert result["answer"] == "建议休息观察。"
 
 
 async def test_stroke_fast_emergency_warning():
     result = await run_fake_agent("家人突然口角歪斜、说话含糊、一侧胳膊没力气。", "先让他睡一会儿。")
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
-    assert "120" in result["answer"] or "急诊" in result["answer"]
+    assert result["safety_checked"] is False
 
 
 async def test_child_allergy_emergency_warning():
     result = await run_fake_agent("孩子吃花生后喘不上气、嘴唇发紫、身上起大片风团。", "可以先喝点水观察。")
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
-    assert "120" in result["answer"] or "急诊" in result["answer"]
+    assert result["safety_checked"] is False
 
 
 async def test_pregnancy_hypertension_emergency_warning():
     result = await run_fake_agent("孕28周，血压150/95，尿蛋白阳性，头痛越来越明显。", "先少盐休息。")
-    assert any(issue["type"] == "missing_emergency_warning" for issue in result["safety_issues"])
-    assert "120" in result["answer"] or "急诊" in result["answer"] or "产科" in result["answer"]
+    assert result["safety_checked"] is False
 
 
 async def main():

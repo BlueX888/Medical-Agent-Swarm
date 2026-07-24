@@ -9,6 +9,7 @@ DiagnosticAgent：症状诊断推理 Agent
 """
 from typing import Dict, Any, Optional
 from loguru import logger
+import re
 
 from .base_agent import BaseAgent
 from .skill_registry_mixin import SkillRegistryMixin
@@ -40,6 +41,9 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
         config.setdefault('max_iterations', 5)
 
         super().__init__(agent_id, config, llm_client)
+
+        # 允许注册的 Skills（白名单过滤）
+        self.allowed_skill_names = ["collect_clinical_context", "assess_risk", "analyze_symptoms"]
 
         # 设置能力标签（Swarm 协作用）
         self.set_capabilities([
@@ -115,6 +119,11 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
 
 【推理过程】
 简述诊断推理逻辑...
+
+在最终回答末尾，请附加一个 JSON 块（严格包裹在 ```json 和 ``` 标记中）：
+```json
+{"risk_level": "low/medium/high/emergency", "key_findings": ["发现1", "发现2"]}
+```
 """
 
     async def post_process_result(
@@ -123,22 +132,37 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
         final_response: str
     ) -> Dict[str, Any]:
         """
-        结果后处理：提取结构化诊断信息
-
-        这里可以添加更复杂的解析逻辑
+        结果后处理：从 JSON 块中提取结构化诊断信息
         """
-        # 尝试提取风险等级
+        import json
+
         risk_level = "unknown"
-        if "风险等级" in final_response:
-            if "高" in final_response or "HIGH" in final_response:
-                risk_level = "high"
-            elif "中" in final_response or "MEDIUM" in final_response:
-                risk_level = "medium"
-            elif "低" in final_response or "LOW" in final_response:
-                risk_level = "low"
+        key_findings = []
+
+        # 尝试从 JSON 块中解析结构化数据
+        json_pattern = r'```json\s*(\{.*?\})\s*```'
+        match = re.search(json_pattern, final_response, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+                risk_level = parsed.get("risk_level", risk_level)
+                key_findings = parsed.get("key_findings", key_findings)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                logger.warning("Failed to parse JSON block from diagnostic response")
+
+        # 回退：如果 JSON 解析失败，使用正则提取
+        if risk_level == "unknown":
+            if "风险等级" in final_response:
+                if "高" in final_response or "HIGH" in final_response:
+                    risk_level = "high"
+                elif "中" in final_response or "MEDIUM" in final_response:
+                    risk_level = "medium"
+                elif "低" in final_response or "LOW" in final_response:
+                    risk_level = "low"
 
         result.update({
             "risk_level": risk_level,
+            "key_findings": key_findings,
             "diagnosis_provided": True
         })
 

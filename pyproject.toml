@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "debug"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests that call real LLM APIs (deselect with '-m \"not integration\"')",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

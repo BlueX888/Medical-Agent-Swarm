@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 Medical-Agent-Swarm 多智能体医疗助手 - 主入口
-交互式对话；可选 -v / --verbose 开启详细日志
+交互式对话；支持命令行参数控制详细日志等
 """
+import argparse
 import asyncio
 import sys
 import time
@@ -11,7 +12,8 @@ from loguru import logger
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from swarm import process_with_swarm
 
@@ -136,8 +138,13 @@ async def interactive_mode():
 
 def main():
     """主函数：启动交互式对话"""
-    verbose = '-v' in sys.argv or '--verbose' in sys.argv
-    setup_logger(verbose)
+    parser = argparse.ArgumentParser(description="Medical-Agent-Swarm 多智能体医疗助手")
+    parser.add_argument("-v", "--verbose", action="store_true", help="开启 DEBUG 级别详细日志")
+    parser.add_argument("--no-swarm", action="store_true", help="禁用多 Agent 协作模式")
+    parser.add_argument("--timeout", type=float, default=120.0, help="Swarm 超时时间（秒）")
+    args = parser.parse_args()
+
+    setup_logger(args.verbose)
 
     try:
         asyncio.run(interactive_mode())

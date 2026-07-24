@@ -59,26 +59,20 @@ class ConversationHistory:
 
 class ShortTermMemory:
     """
-    短期记忆管理器（单例模式）
+    短期记忆管理器
 
     支持两种存储后端：
     1. memory：纯内存存储（默认，快速但不持久）
     2. redis：Redis 存储（可选，持久但需要 Redis 服务）
+
+    注意：不再使用单例模式。每个调用方获得独立实例，避免跨请求数据泄漏。
+    如果需要跨请求共享状态，使用外部存储（Redis）。
 
     使用场景：
     - 管理单次会话的对话历史
     - Agent Loop 中的消息记录
     - 会话结束后转换为长期记忆
     """
-
-    _instance = None  # 单例实例
-    _lock = None  # 用于线程安全（如果需要）
-
-    def __new__(cls, *args, **kwargs):
-        """单例模式：确保只有一个 ShortTermMemory 实例"""
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
     def __init__(
         self,
@@ -92,10 +86,6 @@ class ShortTermMemory:
             storage_type: 存储类型，"memory" 或 "redis"
             redis_config: Redis 配置（storage_type="redis" 时需要）
         """
-        # 防止重复初始化
-        if hasattr(self, '_initialized'):
-            return
-
         self.storage_type = storage_type
         self.sessions: Dict[str, ConversationHistory] = {}
         self.redis_client = None

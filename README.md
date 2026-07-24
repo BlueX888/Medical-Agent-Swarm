@@ -215,6 +215,29 @@ Medical-Agent-Swarm/
 
 使用者应自行评估模型、数据来源和部署方式的可靠性，并对实际使用结果负责。
 
+## LangSmith Observability
+
+LangSmith tracing is optional and off by default. After installing dependencies,
+enable it with environment variables:
+
+```powershell
+$env:LANGSMITH_TRACING = "true"
+$env:LANGSMITH_API_KEY = "lsv2_your_langsmith_key"
+$env:LANGSMITH_PROJECT = "medical-agent-swarm"
+```
+
+When enabled, traces include the top-level `medical_swarm_request`, LangGraph
+node spans such as `graph.plan_and_decompose`, and LLM spans from `LLMClient`.
+Because this is a medical assistant prototype, message text, questions,
+answers, context, tool arguments, and similar payloads are redacted by default
+before they are sent to LangSmith. Use safe synthetic data before setting:
+
+```powershell
+$env:LANGSMITH_REDACT_MEDICAL_TEXT = "false"
+```
+
+Do not enable unredacted tracing with real patient information or other PHI.
+
 ## License
 
 本项目采用 [MIT License](LICENSE)。

@@ -30,6 +30,9 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
             config=config
         )
 
+        # 允许注册的 Skills（白名单过滤）
+        self.allowed_skill_names = ["collect_clinical_context", "assess_risk", "analyze_symptoms", "recommend_lifestyle"]
+
         # 设置能力标签（Swarm 协作用）
         self.set_capabilities([
             "general_health_advice",
@@ -90,6 +93,11 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
 
 【免责声明】
 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。
+
+在最终回答末尾，请附加一个 JSON 块（严格包裹在 ```json 和 ``` 标记中）：
+```json
+{"suggestions": ["核心建议1", "核心建议2"], "disclaimer": "免责声明文本"}
+```
 """
 
     def register_tools(self):
@@ -138,23 +146,38 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
         final_response: str
     ) -> Dict[str, Any]:
         """
-        后处理：从最终响应中提取结构化信息
+        后处理：从最终响应中提取结构化信息（JSON 格式）
         """
-        # 提取核心建议
+        import json
+
         suggestions = []
-        suggestion_pattern = r'【核心建议】\s*\n((?:\d+\.\s*.+\n?)+)'
-        match = re.search(suggestion_pattern, final_response)
+        disclaimer = "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
 
+        # 尝试从 JSON 块中解析结构化数据
+        json_pattern = r'```json\s*(\{.*?\})\s*```'
+        match = re.search(json_pattern, final_response, re.DOTALL)
         if match:
-            suggestion_text = match.group(1)
-            suggestion_lines = re.findall(r'\d+\.\s*(.+)', suggestion_text)
-            suggestions = [s.strip() for s in suggestion_lines if s.strip()]
+            try:
+                parsed = json.loads(match.group(1))
+                suggestions = parsed.get("suggestions", suggestions)
+                disclaimer = parsed.get("disclaimer", disclaimer)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                logger.warning("Failed to parse JSON block from consultation response")
 
-        # 提取免责声明
-        disclaimer_pattern = r'【免责声明】\s*\n(.+)'
-        disclaimer_match = re.search(disclaimer_pattern, final_response)
-        disclaimer = disclaimer_match.group(1) if disclaimer_match else \
-            "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。"
+        # 回退：如果 JSON 解析失败或为空，使用正则提取
+        if not suggestions:
+            suggestion_pattern = r'【核心建议】\s*\n((?:\d+\.\s*.+\n?)+)'
+            match = re.search(suggestion_pattern, final_response)
+            if match:
+                suggestion_text = match.group(1)
+                suggestion_lines = re.findall(r'\d+\.\s*(.+)', suggestion_text)
+                suggestions = [s.strip() for s in suggestion_lines if s.strip()]
+
+        if disclaimer == "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。":
+            disclaimer_pattern = r'【免责声明】\s*\n(.+)'
+            disclaimer_match = re.search(disclaimer_pattern, final_response)
+            if disclaimer_match:
+                disclaimer = disclaimer_match.group(1)
 
         result.update({
             'suggestions': suggestions[:5],  # 最多5条

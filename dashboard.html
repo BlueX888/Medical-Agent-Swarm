@@ -1,0 +1,1775 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Medical Agent Swarm · 患者仪表盘</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+  <style>
+    /* =========================================================
+       NEW BRUTALISM · Patient Dashboard
+       Principles: 0 radius · thick borders · raw contrast ·
+       asymmetrical grid · honest information display
+       ========================================================= */
+
+    /* --- Reset & Base ---------------------------------------- */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --black: #000000;
+      --white: #ffffff;
+      --paper: #F3F3EE;
+      --paper-dark: #E8E8E0;
+      --gray-300: #D4D4CC;
+      --gray-500: #9C9C94;
+      --gray-700: #505050;
+      --red: #D32F2F;
+      --red-bg: #FBE9E7;
+      --blue: #1565C0;
+      --blue-bg: #E3F0FA;
+      --green: #2E7D32;
+      --green-bg: #E8F5E9;
+      --orange: #E65100;
+      --orange-bg: #FFF3E0;
+      --border: 4px;
+      --shadow: 6px 6px 0px var(--black);
+    }
+
+    html {
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      background: var(--paper);
+      color: var(--black);
+      min-height: 100vh;
+      padding: 0;
+    }
+
+    /* --- Typography ----------------------------------------- */
+    h1, h2, h3, h4 {
+      font-weight: 800;
+      line-height: 1.1;
+      text-transform: uppercase;
+      letter-spacing: -0.02em;
+    }
+
+    .mono {
+      font-family: 'JetBrains Mono', 'Courier New', monospace;
+      font-weight: 500;
+    }
+
+    /* --- Layout Container ------------------------------------ */
+    .dashboard {
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 0;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+      border-left: var(--border) solid var(--black);
+      border-right: var(--border) solid var(--black);
+      min-height: 100vh;
+      background: var(--white);
+    }
+
+    /* =========================================================
+       SIGNATURE ELEMENT · Full-width Risk Bar
+       ========================================================= */
+    .risk-bar {
+      background: var(--green);
+      border-bottom: var(--border) solid var(--black);
+      padding: 14px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px 24px;
+      position: relative;
+    }
+
+    .risk-bar.is-moderate {
+      background: var(--orange);
+    }
+
+    .risk-bar.is-high {
+      background: var(--red);
+      animation: risk-pulse 1.2s ease-in-out infinite alternate;
+    }
+
+    .risk-bar.is-safe {
+      background: var(--green);
+    }
+
+    @keyframes risk-pulse {
+      0%   { opacity: 1; }
+      100% { opacity: 0.92; }
+    }
+
+    .risk-level {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .risk-level__badge {
+      display: inline-block;
+      background: var(--black);
+      color: var(--white);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: 0.75rem;
+      padding: 4px 10px;
+      letter-spacing: 0.05em;
+      border: 2px solid var(--black);
+    }
+
+    .risk-level__value {
+      font-weight: 800;
+      font-size: 1.5rem;
+      color: var(--white);
+      text-transform: uppercase;
+      letter-spacing: -0.02em;
+      line-height: 1;
+    }
+
+    .risk-bar.is-high .risk-level__value {
+      text-shadow: 2px 2px 0 rgba(0,0,0,0.3);
+    }
+
+    .risk-meta {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-size: 0.8125rem;
+      color: var(--white);
+      font-weight: 600;
+    }
+
+    .risk-meta span {
+      opacity: 0.85;
+    }
+
+    .risk-meta .mono {
+      opacity: 1;
+      font-weight: 700;
+    }
+
+    /* =========================================================
+       MAIN GRID · Two-column asymmetry
+       ========================================================= */
+    .main-grid {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 0;
+    }
+
+    /* =========================================================
+       LEFT SIDEBAR · Patient Profile
+       ========================================================= */
+    .patient-panel {
+      border-right: var(--border) solid var(--black);
+      background: var(--white);
+    }
+
+    .panel-header {
+      padding: 16px 20px;
+      background: var(--black);
+      color: var(--white);
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-bottom: var(--border) solid var(--black);
+    }
+
+    .panel-header .mono {
+      font-size: 0.65rem;
+      opacity: 0.6;
+      display: block;
+      margin-top: 2px;
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .patient-card {
+      padding: 24px 20px;
+      border-bottom: var(--border) solid var(--black);
+    }
+
+    .patient-avatar {
+      width: 64px;
+      height: 64px;
+      background: var(--black);
+      color: var(--white);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 1.5rem;
+      margin-bottom: 16px;
+      border: 3px solid var(--black);
+      box-shadow: var(--shadow);
+    }
+
+    .patient-name {
+      font-size: 1.5rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: -0.02em;
+      line-height: 1;
+      margin-bottom: 4px;
+    }
+
+    .patient-id {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--gray-500);
+      margin-bottom: 16px;
+    }
+
+    .patient-details {
+      list-style: none;
+      border-top: 2px solid var(--black);
+      padding-top: 12px;
+    }
+
+    .patient-details li {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      font-size: 0.8125rem;
+      border-bottom: 1px solid var(--gray-300);
+    }
+
+    .patient-details li:last-child {
+      border-bottom: none;
+    }
+
+    .patient-details .label {
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.6875rem;
+      letter-spacing: 0.04em;
+      color: var(--gray-700);
+    }
+
+    .patient-details .value {
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+    }
+
+    .quick-stats {
+      padding: 20px;
+      border-bottom: var(--border) solid var(--black);
+    }
+
+    .quick-stat {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--gray-300);
+    }
+
+    .quick-stat:last-child {
+      border-bottom: none;
+    }
+
+    .quick-stat__label {
+      font-size: 0.6875rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--gray-700);
+    }
+
+    .quick-stat__value {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      font-size: 0.875rem;
+    }
+
+    /* --- New Consultation Button --- */
+    .btn-new-consult {
+      display: block;
+      width: calc(100% - 40px);
+      margin: 20px;
+      padding: 14px 0;
+      background: var(--black);
+      color: var(--white);
+      border: 3px solid var(--black);
+      font-weight: 800;
+      font-size: 0.8125rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      text-align: center;
+      transition: none;
+      font-family: inherit;
+    }
+
+    .btn-new-consult:hover {
+      background: var(--white);
+      color: var(--black);
+      box-shadow: var(--shadow);
+    }
+
+    /* =========================================================
+       RIGHT MAIN · Content Area
+       ========================================================= */
+    .content-panel {
+      background: var(--white);
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* --- Active Consultation Card --- */
+    .consultation-card {
+      border-bottom: var(--border) solid var(--black);
+      padding: 24px 28px;
+    }
+
+    .consultation-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .consultation-title {
+      font-size: 1.125rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: -0.01em;
+    }
+
+    .consultation-time {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.6875rem;
+      color: var(--gray-500);
+      font-weight: 500;
+    }
+
+    .consultation-q {
+      font-size: 1rem;
+      line-height: 1.5;
+      padding: 16px;
+      background: var(--paper);
+      border-left: 4px solid var(--black);
+      margin-bottom: 20px;
+      font-weight: 500;
+    }
+
+    .consultation-q::before {
+      content: "Q";
+      display: inline-block;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: 0.75rem;
+      margin-right: 8px;
+      background: var(--black);
+      color: var(--white);
+      padding: 1px 6px;
+      vertical-align: middle;
+    }
+
+    /* --- Agent Progress Timeline --- */
+    .agent-progress {
+      border: 3px solid var(--black);
+      padding: 0;
+      background: var(--white);
+    }
+
+    .agent-progress__header {
+      background: var(--black);
+      color: var(--white);
+      padding: 10px 16px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      border-bottom: 3px solid var(--black);
+    }
+
+    .agent-step {
+      display: grid;
+      grid-template-columns: 32px 1fr auto;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--gray-300);
+      font-size: 0.8125rem;
+    }
+
+    .agent-step:last-child {
+      border-bottom: none;
+    }
+
+    .agent-step__icon {
+      width: 28px;
+      height: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 0.75rem;
+      border: 2px solid var(--black);
+    }
+
+    .agent-step__icon.done {
+      background: var(--green);
+      color: var(--white);
+      border-color: var(--green);
+    }
+
+    .agent-step__icon.running {
+      background: var(--blue);
+      color: var(--white);
+      border-color: var(--blue);
+      animation: blink 0.8s step-end infinite;
+    }
+
+    .agent-step__icon.queued {
+      background: var(--white);
+      color: var(--gray-500);
+      border-color: var(--gray-300);
+    }
+
+    @keyframes blink {
+      50% { opacity: 0.5; }
+    }
+
+    .agent-step__name {
+      font-weight: 600;
+    }
+
+    .agent-step__status {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .agent-step__status.done {
+      color: var(--green);
+    }
+    .agent-step__status.running {
+      color: var(--blue);
+    }
+    .agent-step__status.queued {
+      color: var(--gray-500);
+    }
+
+    /* --- View Full Analysis Link --- */
+    .view-analysis {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 16px;
+      padding: 10px 20px;
+      background: var(--white);
+      color: var(--black);
+      border: 3px solid var(--black);
+      font-weight: 700;
+      font-size: 0.8125rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      text-decoration: none;
+      transition: none;
+    }
+
+    .view-analysis:hover {
+      background: var(--black);
+      color: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .view-analysis::after {
+      content: "→";
+      font-weight: 800;
+      font-size: 1.125rem;
+    }
+
+    /* =========================================================
+       BOTTOM ROW · 3 cards
+       ========================================================= */
+    .bottom-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 0;
+      border-top: none;
+    }
+
+    .bottom-card {
+      border-right: var(--border) solid var(--black);
+      padding: 20px 20px 24px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .bottom-card:last-child {
+      border-right: none;
+    }
+
+    .bottom-card__title {
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--gray-500);
+      margin-bottom: 16px;
+      padding-bottom: 8px;
+      border-bottom: 2px solid var(--black);
+    }
+
+    /* --- Recent Consultations List --- */
+    .consult-list {
+      list-style: none;
+      flex: 1;
+    }
+
+    .consult-list li {
+      padding: 10px 0;
+      border-bottom: 1px solid var(--gray-300);
+      cursor: pointer;
+    }
+
+    .consult-list li:last-child {
+      border-bottom: none;
+    }
+
+    .consult-list li:hover {
+      background: var(--paper);
+      margin: 0 -8px;
+      padding: 10px 8px;
+    }
+
+    .consult-list__q {
+      font-size: 0.8125rem;
+      font-weight: 600;
+      margin-bottom: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .consult-list__meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.625rem;
+      color: var(--gray-500);
+      display: flex;
+      gap: 12px;
+    }
+
+    .risk-tag {
+      display: inline-block;
+      font-weight: 700;
+      font-size: 0.5625rem;
+      padding: 1px 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .risk-tag.low { background: var(--green-bg); color: var(--green); }
+    .risk-tag.mod { background: var(--orange-bg); color: var(--orange); }
+    .risk-tag.high { background: var(--red-bg); color: var(--red); }
+
+    /* --- Risk Trend --- */
+    .trend-chart {
+      flex: 1;
+      display: flex;
+      align-items: flex-end;
+      gap: 6px;
+      padding: 8px 0 0;
+      height: 120px;
+    }
+
+    .trend-bar {
+      flex: 1;
+      min-width: 12px;
+      background: var(--gray-300);
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+    }
+
+    .trend-bar__fill {
+      width: 100%;
+      background: var(--black);
+      transition: height 0.3s;
+    }
+
+    .trend-bar__fill.s1 { height: 20%; background: var(--green); }
+    .trend-bar__fill.s2 { height: 25%; background: var(--green); }
+    .trend-bar__fill.s3 { height: 45%; background: var(--orange); }
+    .trend-bar__fill.s4 { height: 60%; background: var(--orange); }
+    .trend-bar__fill.s5 { height: 35%; background: var(--blue); }
+    .trend-bar__fill.s6 { height: 40%; background: var(--orange); }
+    .trend-bar__fill.s7 { height: 55%; background: var(--orange); }
+
+    .trend-bar__label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.5rem;
+      text-align: center;
+      padding-top: 4px;
+      color: var(--gray-500);
+      font-weight: 500;
+    }
+
+    /* --- Quick Actions --- */
+    .quick-actions {
+      list-style: none;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .quick-actions li {
+      border-bottom: 1px solid var(--gray-300);
+    }
+
+    .quick-actions li:last-child {
+      border-bottom: none;
+    }
+
+    .quick-actions a {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      color: var(--black);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.8125rem;
+    }
+
+    .quick-actions a:hover {
+      padding: 12px 8px;
+      margin: 0 -8px;
+      background: var(--black);
+      color: var(--white);
+    }
+
+    .quick-actions a span.mono {
+      font-size: 0.75rem;
+      color: var(--gray-500);
+      font-weight: 500;
+    }
+
+    .quick-actions a:hover span.mono {
+      color: var(--white);
+      opacity: 0.6;
+    }
+
+    /* =========================================================
+       RESPONSIVE
+       ========================================================= */
+    @media (max-width: 900px) {
+      .main-grid {
+        grid-template-columns: 1fr;
+      }
+      .patient-panel {
+        border-right: none;
+        border-bottom: var(--border) solid var(--black);
+      }
+      .bottom-row {
+        grid-template-columns: 1fr 1fr;
+      }
+      .bottom-card:nth-child(2) {
+        border-right: none;
+      }
+      .bottom-card:nth-child(3) {
+        border-top: var(--border) solid var(--black);
+        grid-column: 1 / -1;
+        border-right: none;
+      }
+      .risk-bar {
+        padding: 12px 20px;
+      }
+      .risk-level__value {
+        font-size: 1.125rem;
+      }
+      .risk-meta {
+        font-size: 0.6875rem;
+        gap: 12px;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .bottom-row {
+        grid-template-columns: 1fr;
+      }
+      .bottom-card {
+        border-right: none;
+        border-bottom: var(--border) solid var(--black);
+      }
+      .bottom-card:last-child {
+        border-bottom: none;
+      }
+      .dashboard {
+        border-left: 2px solid var(--black);
+        border-right: 2px solid var(--black);
+      }
+      .consultation-card {
+        padding: 16px;
+      }
+      .risk-bar {
+        padding: 10px 16px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+    }
+
+    /* =========================================================
+       ACCESSIBILITY · Reduced motion
+       ========================================================= */
+    @media (prefers-reduced-motion: reduce) {
+      .risk-bar.is-high {
+        animation: none;
+      }
+      .agent-step__icon.running {
+        animation: none;
+        opacity: 1;
+      }
+    }
+
+    /* Focus visible for keyboard nav */
+    a:focus-visible,
+    button:focus-visible {
+      outline: 3px solid var(--blue);
+      outline-offset: 2px;
+    }
+
+    /* =========================================================
+       INTERACTIVE · Risk Controls
+       ========================================================= */
+    .risk-controls {
+      display: flex;
+      gap: 0;
+      border: 2px solid var(--black);
+      margin-left: 8px;
+    }
+
+    .risk-controls button {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.625rem;
+      font-weight: 700;
+      padding: 4px 10px;
+      border: none;
+      border-right: 1px solid rgba(255,255,255,0.3);
+      cursor: pointer;
+      background: transparent;
+      color: var(--white);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      transition: none;
+    }
+
+    .risk-controls button:last-child {
+      border-right: none;
+    }
+
+    .risk-controls button:hover {
+      background: rgba(0,0,0,0.2);
+    }
+
+    .risk-controls button.is-active {
+      background: var(--black);
+      color: var(--white);
+    }
+
+    /* =========================================================
+       INTERACTIVE · Emergency Overlay (HIGH risk only)
+       ========================================================= */
+    .emergency-overlay {
+      display: none;
+      background: var(--red);
+      border: 4px solid var(--black);
+      padding: 20px 28px;
+      margin: 0;
+      border-bottom: var(--border) solid var(--black);
+    }
+
+    .emergency-overlay.is-visible {
+      display: block;
+      animation: emer-slide 0.3s ease-out;
+    }
+
+    @keyframes emer-slide {
+      0%   { transform: translateY(-100%); opacity: 0; }
+      100% { transform: translateY(0); opacity: 1; }
+    }
+
+    .emergency-overlay__content {
+      display: flex;
+      align-items: flex-start;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .emergency-overlay__icon {
+      font-size: 2rem;
+      font-weight: 800;
+      line-height: 1;
+      color: var(--white);
+      text-shadow: 3px 3px 0 rgba(0,0,0,0.2);
+      flex-shrink: 0;
+    }
+
+    .emergency-overlay__text {
+      flex: 1;
+    }
+
+    .emergency-overlay__text h3 {
+      color: var(--white);
+      font-size: 1.25rem;
+      margin-bottom: 4px;
+    }
+
+    .emergency-overlay__text p {
+      color: rgba(255,255,255,0.9);
+      font-weight: 600;
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    .emergency-overlay__action {
+      flex-shrink: 0;
+      padding: 10px 24px;
+      background: var(--black);
+      color: var(--white);
+      border: 3px solid var(--black);
+      font-weight: 800;
+      font-size: 0.8125rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      font-family: inherit;
+      align-self: center;
+    }
+
+    .emergency-overlay__action:hover {
+      background: var(--white);
+      color: var(--black);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .emergency-overlay.is-visible {
+        animation: none;
+      }
+    }
+
+    /* =========================================================
+       INTERACTIVE · New Consultation Modal
+       ========================================================= */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      justify-content: center;
+      align-items: flex-start;
+      padding-top: 10vh;
+    }
+
+    .modal-overlay.is-open {
+      display: flex;
+    }
+
+    .modal {
+      background: var(--white);
+      border: 4px solid var(--black);
+      box-shadow: 10px 10px 0 var(--black);
+      width: 560px;
+      max-width: 94vw;
+      position: relative;
+    }
+
+    .modal__header {
+      background: var(--black);
+      color: var(--white);
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 4px solid var(--black);
+    }
+
+    .modal__header h2 {
+      font-size: 0.875rem;
+      letter-spacing: 0.06em;
+    }
+
+    .modal__close {
+      background: none;
+      border: 2px solid var(--white);
+      color: var(--white);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 800;
+      font-size: 1rem;
+      width: 32px;
+      height: 32px;
+      cursor: pointer;
+    }
+
+    .modal__close:hover {
+      background: var(--white);
+      color: var(--black);
+    }
+
+    .modal__body {
+      padding: 24px;
+    }
+
+    .modal__field {
+      margin-bottom: 20px;
+    }
+
+    .modal__field label {
+      display: block;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+
+    .modal__field textarea,
+    .modal__field input {
+      width: 100%;
+      padding: 12px;
+      border: 3px solid var(--black);
+      font-family: inherit;
+      font-size: 0.875rem;
+      background: var(--paper);
+      border-radius: 0;
+      outline: none;
+    }
+
+    .modal__field textarea:focus,
+    .modal__field input:focus {
+      background: var(--white);
+      box-shadow: 4px 4px 0 var(--black);
+    }
+
+    .modal__field textarea {
+      min-height: 100px;
+      resize: vertical;
+    }
+
+    .modal__row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .modal__actions {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      margin-top: 24px;
+      padding-top: 16px;
+      border-top: 2px solid var(--black);
+    }
+
+    .btn-primary {
+      padding: 12px 28px;
+      background: var(--black);
+      color: var(--white);
+      border: 3px solid var(--black);
+      font-weight: 800;
+      font-size: 0.8125rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .btn-primary:hover {
+      background: var(--white);
+      color: var(--black);
+      box-shadow: 4px 4px 0 var(--black);
+    }
+
+    .btn-secondary {
+      padding: 12px 28px;
+      background: var(--white);
+      color: var(--black);
+      border: 3px solid var(--black);
+      font-weight: 700;
+      font-size: 0.8125rem;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .btn-secondary:hover {
+      background: var(--paper-dark);
+    }
+
+    /* =========================================================
+       INTERACTIVE · Analysis Detail Panel
+       ========================================================= */
+    .analysis-detail {
+      display: none;
+      margin-top: 16px;
+      border: 3px solid var(--black);
+      background: var(--paper);
+    }
+
+    .analysis-detail.is-open {
+      display: block;
+    }
+
+    .analysis-detail__header {
+      background: var(--black);
+      color: var(--white);
+      padding: 10px 16px;
+      font-size: 0.6875rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .analysis-detail__close {
+      background: none;
+      border: 1px solid var(--white);
+      color: var(--white);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 700;
+      width: 24px;
+      height: 24px;
+      cursor: pointer;
+    }
+
+    .analysis-detail__close:hover {
+      background: var(--white);
+      color: var(--black);
+    }
+
+    .analysis-detail__body {
+      padding: 16px;
+      font-size: 0.8125rem;
+      line-height: 1.6;
+    }
+
+    .analysis-detail__body h4 {
+      font-size: 0.75rem;
+      margin-bottom: 8px;
+      margin-top: 16px;
+      color: var(--gray-700);
+    }
+
+    .analysis-detail__body h4:first-child {
+      margin-top: 0;
+    }
+
+    .analysis-detail__body .finding {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--gray-300);
+    }
+
+    .analysis-detail__body .finding:last-child {
+      border-bottom: none;
+    }
+
+    /* =========================================================
+       INTERACTIVE · Status Toast
+       ========================================================= */
+    .toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      z-index: 2000;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .toast {
+      background: var(--black);
+      color: var(--white);
+      border: 3px solid var(--black);
+      padding: 12px 20px;
+      font-size: 0.8125rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 6px 6px 0 rgba(0,0,0,0.15);
+      animation: toast-in 0.25s ease-out;
+    }
+
+    .toast .mono {
+      font-size: 0.75rem;
+      opacity: 0.7;
+    }
+
+    @keyframes toast-in {
+      0%   { transform: translateX(100%); opacity: 0; }
+      100% { transform: translateX(0); opacity: 1; }
+    }
+
+    /* =========================================================
+       INTERACTIVE · Chain Simulation Status
+       ========================================================= */
+    .chain-status {
+      margin-top: 12px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.625rem;
+      color: var(--gray-500);
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .chain-status .dot {
+      width: 6px;
+      height: 6px;
+      background: var(--gray-300);
+      display: inline-block;
+    }
+
+    .chain-status .dot.live {
+      background: var(--blue);
+      animation: blink 0.8s step-end infinite;
+    }
+
+    /* =========================================================
+       INTERACTIVE · Copy update (time)
+       ========================================================= */
+    .time-live {
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* =========================================================
+       FOOTER
+       ========================================================= */
+    .dashboard-footer {
+      border-top: var(--border) solid var(--black);
+      padding: 16px 28px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-size: 0.6875rem;
+      color: var(--gray-500);
+      background: var(--paper);
+    }
+
+    .dashboard-footer .mono {
+      font-size: 0.625rem;
+    }
+
+    .dashboard-footer a {
+      color: var(--black);
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+
+    <!-- =====================================================
+         SIGNATURE · Risk Status Bar
+         ===================================================== -->
+    <header class="risk-bar is-moderate" role="banner" id="riskBar">
+      <div class="risk-level">
+        <span class="risk-level__badge">RISK</span>
+        <span class="risk-level__value" id="riskValue">MODERATE</span>
+        <span class="risk-controls" id="riskControls">
+          <button data-risk="safe"      onclick="setRisk('safe')">低</button>
+          <button data-risk="moderate"  onclick="setRisk('moderate')" class="is-active">中</button>
+          <button data-risk="high"      onclick="setRisk('high')">高</button>
+        </span>
+      </div>
+      <div class="risk-meta">
+        <span>评估时间 <time class="mono" id="evalTime">--</time></span>
+        <span>｜</span>
+        <span>上次更新 <span class="mono" id="lastUpdate">0s</span> 前</span>
+      </div>
+    </header>
+
+    <!-- =====================================================
+         EMERGENCY OVERLAY · Shown only at HIGH risk
+         ===================================================== -->
+    <div class="emergency-overlay" id="emergencyOverlay">
+      <div class="emergency-overlay__content">
+        <div class="emergency-overlay__icon">⚠</div>
+        <div class="emergency-overlay__text">
+          <h3>需要立即就医</h3>
+          <p>当前症状组合（头痛 + 恶心 + 发热）符合高风险预警标准。建议尽快前往急诊或联系急救服务。</p>
+        </div>
+        <button class="emergency-overlay__action" onclick="showToast('已转发紧急请求','EMERG')">呼叫急救</button>
+      </div>
+    </div>
+
+    <!-- =====================================================
+         MAIN GRID
+         ===================================================== -->
+    <div class="main-grid">
+
+      <!-- ============ LEFT SIDEBAR ======================== -->
+      <aside class="patient-panel">
+        <div class="panel-header">
+          PATIENT
+          <span class="mono">患者信息</span>
+        </div>
+
+        <div class="patient-card">
+          <div class="patient-avatar">李</div>
+          <h1 class="patient-name">李明</h1>
+          <div class="patient-id mono">#P2301 · 会话 #4</div>
+          <ul class="patient-details">
+            <li>
+              <span class="label">性别</span>
+              <span class="value">男</span>
+            </li>
+            <li>
+              <span class="label">年龄</span>
+              <span class="value">30</span>
+            </li>
+            <li>
+              <span class="label">既往史</span>
+              <span class="value" id="patientHistory">无</span>
+            </li>
+            <li>
+              <span class="label">药物</span>
+              <span class="value" id="patientMeds">无</span>
+            </li>
+          </ul>
+        </div>
+
+        <div class="quick-stats">
+          <div class="quick-stat">
+            <span class="quick-stat__label">今日咨询</span>
+            <span class="quick-stat__value" id="todayCount">2</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">历史会话</span>
+            <span class="quick-stat__value">4</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">系统延迟</span>
+            <span class="quick-stat__value">1.2s</span>
+          </div>
+          <div class="quick-stat">
+            <span class="quick-stat__label">活跃 Agents</span>
+            <span class="quick-stat__value" id="agentCount">4 / 5</span>
+          </div>
+        </div>
+
+        <button class="btn-new-consult" onclick="openModal()">＋ 新咨询</button>
+      </aside>
+
+      <!-- ============ RIGHT CONTENT ======================= -->
+      <main class="content-panel">
+
+        <!-- Active Consultation -->
+        <section class="consultation-card">
+          <div class="consultation-header">
+            <h2 class="consultation-title" id="consultTitle">当前咨询</h2>
+            <span class="consultation-time mono" id="consultTime">STARTED 09:43:12</span>
+          </div>
+
+          <div class="consultation-q" id="consultQuestion">
+            最近两天头痛并伴有恶心，需要马上就医吗？
+          </div>
+
+          <div class="agent-progress" id="agentProgress">
+            <div class="agent-progress__header" style="display:flex;justify-content:space-between;align-items:center;">
+              <span>Agent 处理进度</span>
+              <span id="chainHint" style="font-weight:400;font-size:0.625rem;opacity:0.7;letter-spacing:0;">点击步进 ▶</span>
+            </div>
+
+            <div class="agent-step" data-agent="0">
+              <span class="agent-step__icon done">✓</span>
+              <span class="agent-step__name">症状分析 · DiagnosticAgent</span>
+              <span class="agent-step__status done">完成</span>
+            </div>
+
+            <div class="agent-step" data-agent="1">
+              <span class="agent-step__icon running">▶</span>
+              <span class="agent-step__name">风险评估 · ConsultationAgent</span>
+              <span class="agent-step__status running">进行中</span>
+            </div>
+
+            <div class="agent-step" data-agent="2">
+              <span class="agent-step__icon queued">—</span>
+              <span class="agent-step__name">资料检索 · ResearchAgent</span>
+              <span class="agent-step__status queued">排队</span>
+            </div>
+
+            <div class="agent-step" data-agent="3">
+              <span class="agent-step__icon queued">—</span>
+              <span class="agent-step__name">生活方式建议 · LifestyleAgent</span>
+              <span class="agent-step__status queued">排队</span>
+            </div>
+          </div>
+
+          <div class="chain-status" id="chainStatus">
+            <span class="dot live"></span>
+            <span>Chain 运行中 · </span>
+            <span id="chainElapsed">00:00</span>
+            <span style="opacity:0.4;margin-left:auto;cursor:pointer;" onclick="resetChain()">↺ 重置</span>
+          </div>
+
+          <!-- Analysis Detail Panel (expandable) -->
+          <div class="analysis-detail" id="analysisDetail">
+            <div class="analysis-detail__header">
+              <span>完整分析报告</span>
+              <button class="analysis-detail__close" onclick="toggleAnalysis()">✕</button>
+            </div>
+            <div class="analysis-detail__body" id="analysisBody">
+              <h4>DiagnosticAgent · 初步发现</h4>
+              <div class="finding"><span>偏头痛可能性</span><span style="font-weight:700;color:var(--orange);">中等</span></div>
+              <div class="finding"><span>颅内压异常</span><span style="font-weight:700;color:var(--green);">低</span></div>
+              <div class="finding"><span>颈椎相关头痛</span><span style="font-weight:700;color:var(--green);">低</span></div>
+              <h4>ConsultationAgent · 风险评估</h4>
+              <div class="finding"><span>就医紧迫性</span><span style="font-weight:700;color:var(--orange);">MODERATE</span></div>
+              <div class="finding"><span>伴随症状警告</span><span style="font-weight:700;color:var(--orange);">恶心持续 &gt;48h</span></div>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;">
+            <a href="#" class="view-analysis" onclick="event.preventDefault();toggleAnalysis();">查看完整分析</a>
+          </div>
+        </section>
+
+        <!-- Bottom Row -->
+        <div class="bottom-row">
+
+          <!-- Card 1: Recent Consultations -->
+          <section class="bottom-card">
+            <h3 class="bottom-card__title">最近咨询</h3>
+            <ul class="consult-list" id="consultList">
+              <li onclick="loadConsult(0)">
+                <div class="consult-list__q">最近两天头痛并伴有恶心...</div>
+                <div class="consult-list__meta">
+                  <span class="risk-tag mod">中</span>
+                  <span>09:43</span>
+                </div>
+              </li>
+              <li onclick="loadConsult(1)">
+                <div class="consult-list__q">偶尔胸闷，运动后加重</div>
+                <div class="consult-list__meta">
+                  <span class="risk-tag low">低</span>
+                  <span>昨天 14:20</span>
+                </div>
+              </li>
+              <li onclick="loadConsult(2)">
+                <div class="consult-list__q">喉咙痛伴发热38.5°C</div>
+                <div class="consult-list__meta">
+                  <span class="risk-tag low">低</span>
+                  <span>昨天 10:15</span>
+                </div>
+              </li>
+              <li onclick="loadConsult(3)">
+                <div class="consult-list__q">突发左胸剧烈疼痛...</div>
+                <div class="consult-list__meta">
+                  <span class="risk-tag high">高</span>
+                  <span>2026-07-07</span>
+                </div>
+              </li>
+            </ul>
+          </section>
+
+          <!-- Card 2: Risk Trend -->
+          <section class="bottom-card">
+            <h3 class="bottom-card__title">风险趋势</h3>
+            <div class="trend-chart" id="trendChart">
+              <div class="trend-bar" data-day="0">
+                <div class="trend-bar__fill s1"></div>
+                <span class="trend-bar__label">07/03</span>
+              </div>
+              <div class="trend-bar" data-day="1">
+                <div class="trend-bar__fill s2"></div>
+                <span class="trend-bar__label">07/04</span>
+              </div>
+              <div class="trend-bar" data-day="2">
+                <div class="trend-bar__fill s3"></div>
+                <span class="trend-bar__label">07/05</span>
+              </div>
+              <div class="trend-bar" data-day="3">
+                <div class="trend-bar__fill s4"></div>
+                <span class="trend-bar__label">07/06</span>
+              </div>
+              <div class="trend-bar" data-day="4">
+                <div class="trend-bar__fill s5"></div>
+                <span class="trend-bar__label">07/07</span>
+              </div>
+              <div class="trend-bar" data-day="5">
+                <div class="trend-bar__fill s6"></div>
+                <span class="trend-bar__label">07/08</span>
+              </div>
+              <div class="trend-bar" data-day="6">
+                <div class="trend-bar__fill s7"></div>
+                <span class="trend-bar__label">今日</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- Card 3: Quick Actions -->
+          <section class="bottom-card">
+            <h3 class="bottom-card__title">快捷操作</h3>
+            <ul class="quick-actions">
+              <li><a href="#" onclick="event.preventDefault();showToast('症状自查已启动','SYMPTOM')">症状自查 <span class="mono">→</span></a></li>
+              <li><a href="#" onclick="event.preventDefault();showToast('加载咨询历史...','HISTORY')">咨询历史 <span class="mono">→</span></a></li>
+              <li><a href="#" onclick="event.preventDefault();showToast('打开文件选择器','UPLOAD')">上传检查报告 <span class="mono">→</span></a></li>
+              <li><a href="#" onclick="event.preventDefault();setRisk('high')">紧急求助 <span class="mono">→</span></a></li>
+              <li><a href="#" onclick="event.preventDefault();showToast('打开记忆管理器','MEMORY')">管理记忆 <span class="mono">→</span></a></li>
+            </ul>
+          </section>
+
+        </div><!-- /bottom-row -->
+      </main>
+    </div><!-- /main-grid -->
+
+    <!-- =====================================================
+         FOOTER · Safety Notice
+         ===================================================== -->
+    <footer class="dashboard-footer">
+      <span>⚠ 本系统为辅助决策工具，不能替代专业医疗诊断。</span>
+      <span class="mono">Medical-Agent-Swarm v0.1 · <span id="clockDisplay">--:--:--</span></span>
+    </footer>
+
+  </div><!-- /dashboard -->
+
+  <!-- =====================================================
+       MODAL · New Consultation
+       ===================================================== -->
+  <div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <div class="modal__header">
+        <h2>＋ 新建咨询</h2>
+        <button class="modal__close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal__body">
+        <div class="modal__field">
+          <label for="modalQuestion">主诉</label>
+          <textarea id="modalQuestion" placeholder="请描述您的症状或健康问题...">最近两天头痛并伴有恶心，需要马上就医吗？</textarea>
+        </div>
+        <div class="modal__row">
+          <div class="modal__field">
+            <label for="modalAge">年龄</label>
+            <input type="number" id="modalAge" value="30" min="0" max="150">
+          </div>
+          <div class="modal__field">
+            <label for="modalSex">性别</label>
+            <input type="text" id="modalSex" value="男" placeholder="男/女">
+          </div>
+        </div>
+        <div class="modal__field">
+          <label for="modalHistory">既往病史（可选）</label>
+          <input type="text" id="modalHistory" placeholder="如：高血压、糖尿病...">
+        </div>
+        <div class="modal__actions">
+          <button class="btn-secondary" onclick="closeModal()">取消</button>
+          <button class="btn-primary" onclick="submitConsult()">提交咨询</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================
+       TOAST CONTAINER
+       ===================================================== -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script>
+    /* ============================================================
+       INTERACTIVE ENGINE
+       ============================================================ */
+
+    // ---- Data --------------------------------------------------
+    const CONSULTS = [
+      { q: '最近两天头痛并伴有恶心，需要马上就医吗？', risk: 'moderate', time: '09:43', agents: ['done','running','queued','queued'], detail: 'moderate' },
+      { q: '偶尔胸闷，运动后加重',                       risk: 'low',     time: '昨天 14:20', agents: ['done','done','done','done'], detail: 'low' },
+      { q: '喉咙痛伴发热38.5°C',                        risk: 'low',     time: '昨天 10:15', agents: ['done','done','done','queued'], detail: 'low' },
+      { q: '突发左胸剧烈疼痛，持续约10分钟',               risk: 'high',    time: '2026-07-07', agents: ['done','done','done','done'], detail: 'high' },
+    ];
+
+    const RISK_LABELS = { safe: 'SAFE', moderate: 'MODERATE', high: 'HIGH' };
+    const RISK_CLASS  = { safe: 'is-safe', moderate: 'is-moderate', high: 'is-high' };
+    const RISK_COLORS = { safe: '#2E7D32', moderate: '#E65100', high: '#D32F2F' };
+
+    let currentRisk  = 'moderate';
+    let currentConsult = 0;
+    let chainTimer   = null;
+    let chainSeconds = 0;
+    let clockTimer   = null;
+
+    // ---- Risk Controls ----------------------------------------
+    function setRisk(level) {
+      currentRisk = level;
+      const bar = document.getElementById('riskBar');
+      const val = document.getElementById('riskValue');
+
+      // Clear all risk classes and set the new one
+      bar.classList.remove('is-safe', 'is-moderate', 'is-high');
+      bar.classList.add(RISK_CLASS[level]);
+      val.textContent = RISK_LABELS[level];
+
+      // Update risk control button states
+      document.querySelectorAll('#riskControls button').forEach(btn => {
+        btn.classList.toggle('is-active', btn.dataset.risk === level);
+      });
+
+      // Emergency overlay
+      const overlay = document.getElementById('emergencyOverlay');
+      overlay.classList.toggle('is-visible', level === 'high');
+
+      // Show toast
+      if (level === 'high') {
+        showToast('⚠ 风险等级已提升至 HIGH', 'RISK');
+      } else {
+        showToast(`风险等级调整为 ${RISK_LABELS[level]}`, 'RISK');
+      }
+
+      // Update eval time
+      document.getElementById('evalTime').textContent = now();
+    }
+
+    // ---- Agent Chain Simulation -------------------------------
+    function stepChain() {
+      const steps = document.querySelectorAll('.agent-step');
+      let foundRunning = false;
+
+      steps.forEach((step, i) => {
+        const icon = step.querySelector('.agent-step__icon');
+        const status = step.querySelector('.agent-step__status');
+
+        if (icon.classList.contains('running') && !foundRunning) {
+          // Mark this one as done
+          icon.className = 'agent-step__icon done';
+          icon.textContent = '✓';
+          status.className = 'agent-step__status done';
+          status.textContent = '完成';
+          foundRunning = true;
+
+          // Wake the next one
+          if (i + 1 < steps.length) {
+            const nextIcon = steps[i+1].querySelector('.agent-step__icon');
+            const nextStatus = steps[i+1].querySelector('.agent-step__status');
+            if (nextIcon.classList.contains('queued')) {
+              nextIcon.className = 'agent-step__icon running';
+              nextIcon.textContent = '▶';
+              nextStatus.className = 'agent-step__status running';
+              nextStatus.textContent = '进行中';
+            }
+          }
+        }
+      });
+
+      if (!foundRunning) {
+        // All done
+        clearInterval(chainTimer);
+        chainTimer = null;
+        document.getElementById('chainStatus').querySelector('.dot').className = 'dot';
+        document.getElementById('chainStatus').querySelector('.dot').style.background = 'var(--green)';
+        document.getElementById('chainHint').textContent = '✓ 全部完成';
+        showToast('所有 Agent 已完成分析', 'CHAIN');
+      }
+    }
+
+    function resetChain() {
+      // Clear existing timer
+      if (chainTimer) { clearInterval(chainTimer); chainTimer = null; }
+      chainSeconds = 0;
+      document.getElementById('chainElapsed').textContent = '00:00';
+
+      // Reset all steps
+      const steps = document.querySelectorAll('.agent-step');
+      const states = CONSULTS[currentConsult].agents;
+
+      steps.forEach((step, i) => {
+        const icon = step.querySelector('.agent-step__icon');
+        const status = step.querySelector('.agent-step__status');
+        const s = states[i] || 'queued';
+
+        icon.className = `agent-step__icon ${s}`;
+        icon.textContent = s === 'done' ? '✓' : s === 'running' ? '▶' : '—';
+        status.className = `agent-step__status ${s}`;
+        status.textContent = s === 'done' ? '完成' : s === 'running' ? '进行中' : '排队';
+      });
+
+      // Reset chain status
+      const dot = document.getElementById('chainStatus').querySelector('.dot');
+      dot.className = 'dot live';
+      dot.style.background = '';
+      document.getElementById('chainHint').textContent = '点击步进 ▶';
+
+      // Start timer if not done
+      startChainTimer();
+    }
+
+    function startChainTimer() {
+      if (chainTimer) clearInterval(chainTimer);
+      chainTimer = setInterval(() => {
+        chainSeconds++;
+        const m = String(Math.floor(chainSeconds / 60)).padStart(2, '0');
+        const s = String(chainSeconds % 60).padStart(2, '0');
+        document.getElementById('chainElapsed').textContent = `${m}:${s}`;
+      }, 1000);
+    }
+
+    // ---- Load Consultation ------------------------------------
+    function loadConsult(idx) {
+      currentConsult = idx;
+      const c = CONSULTS[idx];
+      document.getElementById('consultQuestion').textContent = c.q;
+      document.getElementById('consultTime').textContent = `STARTED ${c.time}`;
+      document.getElementById('consultTitle').textContent = idx === 0 ? '当前咨询' : '历史咨询';
+      setRisk(c.risk);
+      resetChain();
+      document.getElementById('analysisDetail').classList.remove('is-open');
+    }
+
+    // ---- Analysis Detail Toggle -------------------------------
+    function toggleAnalysis() {
+      document.getElementById('analysisDetail').classList.toggle('is-open');
+    }
+
+    // ---- Modal ------------------------------------------------
+    function openModal() {
+      document.getElementById('modalOverlay').classList.add('is-open');
+    }
+
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.remove('is-open');
+    }
+
+    function submitConsult() {
+      const q = document.getElementById('modalQuestion').value.trim() || '新咨询';
+      const age = document.getElementById('modalAge').value;
+      const sex = document.getElementById('modalSex').value;
+      const history = document.getElementById('modalHistory').value;
+
+      // Add to consult list (prepend)
+      const list = document.getElementById('consultList');
+      const li = document.createElement('li');
+      li.innerHTML = `<div class="consult-list__q">${q.substring(0, 20)}...</div>
+        <div class="consult-list__meta">
+          <span class="risk-tag mod">新</span>
+          <span>刚刚</span>
+        </div>`;
+      li.onclick = function() { loadConsult(0); };
+      li.style.borderTop = '3px solid var(--black)';
+      list.prepend(li);
+
+      // Update patient info
+      document.getElementById('patientHistory').textContent = history || '无';
+      const count = parseInt(document.getElementById('todayCount').textContent);
+      document.getElementById('todayCount').textContent = count + 1;
+
+      // Load the new consult
+      CONSULTS.unshift({ q, risk: 'moderate', time: now().slice(11,16), agents: ['running','queued','queued','queued'], detail: 'moderate' });
+      currentConsult = 0;
+      document.getElementById('consultQuestion').textContent = q;
+      document.getElementById('consultTime').textContent = `STARTED ${now().slice(11,16)}`;
+      setRisk('moderate');
+      resetChain();
+      // First step already running per the data above
+      closeModal();
+      showToast('新咨询已提交，Agent 正在处理', 'SUBMIT');
+    }
+
+    // ---- Toast -------------------------------------------------
+    function showToast(msg, tag) {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = 'toast';
+      toast.innerHTML = `<span class="mono">${tag}</span> ${msg}`;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transition = 'opacity 0.3s';
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
+    // ---- Clock & Time Helpers -----------------------------------
+    function now() {
+      const d = new Date();
+      return d.toISOString().replace('T', ' ').slice(0, 19);
+    }
+
+    function updateClock() {
+      const d = new Date();
+      document.getElementById('clockDisplay').textContent = d.toTimeString().slice(0,8);
+    }
+
+    function updateLastUpdate() {
+      const bar = document.getElementById('riskBar');
+      const el = document.getElementById('lastUpdate');
+      let seconds = parseInt(el.textContent) || 0;
+      setInterval(() => {
+        seconds++;
+        if (seconds > 99) {
+          el.textContent = `${Math.floor(seconds/60)}m ${seconds%60}s`;
+        } else {
+          el.textContent = `${seconds}s`;
+        }
+      }, 1000);
+    }
+
+    // ---- Agent step on click (main interaction) -----------------
+    document.addEventListener('DOMContentLoaded', () => {
+      // Agent progress click to step
+      document.getElementById('agentProgress').addEventListener('click', function(e) {
+        // Only step if clicking the container or header area, not individual steps
+        if (e.target.closest('.agent-step') || e.target.closest('.agent-progress__header') || e.target.closest('.chain-status')) {
+          return;
+        }
+        stepChain();
+      });
+
+      // But also clicking on steps works
+      document.querySelectorAll('.agent-step').forEach(el => {
+        el.addEventListener('click', function(e) {
+          e.stopPropagation();
+          stepChain();
+        });
+      });
+
+      // Init
+      updateClock();
+      setInterval(updateClock, 1000);
+      updateLastUpdate();
+      startChainTimer();
+      document.getElementById('evalTime').textContent = now();
+
+      // Trend chart animation on load
+      setTimeout(() => {
+        document.querySelectorAll('.trend-bar__fill').forEach(el => {
+          el.style.transition = 'height 0.5s ease';
+        });
+      }, 100);
+    });
+  </script>
+</body>
+</html>

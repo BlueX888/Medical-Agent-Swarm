@@ -16,11 +16,11 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from core import LLMClient
-from core.safety_guard import SafetyGuard
+from core.observability import trace_async
 from debug import DebugTraceCollector
 from memory import LongTermMemory, SessionSummary, SessionSummaryManager, ShortTermMemory
+from memory.evidence_cache import EvidenceMemory
 
-from .events import Event, EventType
 from .medical_swarm_state import MedicalSwarmState
 from .shared_context import SharedContext, SubTask
 
@@ -55,7 +55,6 @@ class MedicalSwarmGraph:
         self.enable_memory = enable_memory
         self.swarm_timeout = swarm_timeout
         self.swarm_timeout_grace_s = swarm_timeout_grace_s
-        self.safety_guard = SafetyGuard()
 
         self._compiled_graph = self.build_graph()
 
@@ -233,21 +232,50 @@ class MedicalSwarmGraph:
         question = state["question"]
         context = state.get("enhanced_context") or {}
 
+        memory_assessment = self._assessment_from_evidence_memory(question)
+        if memory_assessment:
+            subtasks = memory_assessment.get("subtasks", [])
+            collector = self._get_debug_collector(state)
+            if collector:
+                collector.record_event(
+                    "planning",
+                    name="evidence_memory_plan",
+                    input={"question": question},
+                    output=memory_assessment,
+                    metadata={
+                        "subtasks_count": len(subtasks),
+                        "source": "evidence_memory",
+                    },
+                )
+                collector.record_event(
+                    "constraint_check",
+                    name="validate_task_decomposition",
+                    input={"question": question, "subtasks": subtasks},
+                    output={
+                        "valid": True,
+                        "issues": [],
+                        "recommendations": [],
+                        "note": "Evidence memory shortcut generated a single-agent plan.",
+                    },
+                    metadata={"subtasks_count": len(subtasks)},
+                )
+            logger.info(
+                "MedicalSwarmGraph used evidence memory plan "
+                f"({memory_assessment.get('memory_id')}, {len(subtasks)} subtasks)"
+            )
+            return {"assessment": memory_assessment, "subtasks": subtasks}
+
         messages = [
             {"role": "system", "content": self._get_planning_prompt()},
             {"role": "user", "content": f"问题：{question}\n\n背景：{context or '无'}"},
         ]
 
         try:
-            content = await self.llm_client.chat(
-                messages,
-                debug_collector=self._get_debug_collector(state),
-                trace_name="plan_and_decompose",
-            )
+            content = await self._call_llm_with_retry(messages, state)
             logger.debug(f"MedicalSwarmGraph planning response: {content[:200]}...")
             assessment = self._parse_planning_response(content)
         except Exception as exc:
-            logger.error(f"MedicalSwarmGraph planning error: {exc}")
+            logger.error(f"MedicalSwarmGraph planning error after retries: {exc}")
             assessment = {
                 "subtasks": [],
                 "reason": f"规划失败：{exc}",
@@ -299,49 +327,22 @@ class MedicalSwarmGraph:
 
     async def run_single_agent(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Run the selected worker directly for a one-subtask plan."""
-        question = state["question"]
-        session_id = state["session_id"]
-        enhanced_context = state.get("enhanced_context") or {}
         task = (state.get("subtasks") or [{}])[0]
         agent_id = task.get("assigned_agent")
         agent = self._get_agent_by_id(agent_id)
-        tool_policy = self._tool_policy_for_request(
-            question=question,
-            context=enhanced_context,
-            assessment=state.get("assessment") or {},
-            task=task,
-        )
-
         if agent is None:
             logger.warning(f"Unknown agent_id: {agent_id}, fallback to ConsultationAgent")
             agent = self.consultation_agent
             agent_id = agent.agent_id
-
-        result = await agent.process(
-            {
-                "question": question,
-                "context": enhanced_context,
-                "session_id": session_id,
-                "tool_policy": tool_policy,
-                "debug_collector": self._get_debug_collector(state),
-            }
+        return await self._run_agent_exec(
+            agent=agent,
+            question=state["question"],
+            enhanced_context=state.get("enhanced_context") or {},
+            session_id=state["session_id"],
+            collector=self._get_debug_collector(state),
+            route_reason=f"单任务路由到 {agent_id}",
+            task=task,
         )
-        final_answer = result.get("answer", "")
-
-        result.update(
-            {
-                "swarm_enabled": False,
-                "session_id": session_id,
-                "route_reason": f"单任务路由到 {agent_id}",
-            }
-        )
-        result.setdefault(
-            "disclaimer",
-            "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
-        )
-        result.setdefault("suggestions", [])
-
-        return {"result": result, "final_answer": final_answer}
 
     async def run_swarm(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Run multi-worker collaboration inside a LangGraph node."""
@@ -353,17 +354,6 @@ class MedicalSwarmGraph:
 
         for worker in self.worker_pool:
             worker.attach_shared_context(shared_context)
-
-        shared_context.publish_event(
-            Event(
-                type=EventType.SWARM_STARTED,
-                source_agent="medical_swarm_graph",
-                data={
-                    "question": question,
-                    "num_subtasks": len(assessment.get("subtasks", [])),
-                },
-            )
-        )
 
         subtasks = self._create_subtasks(
             assessment,
@@ -451,23 +441,40 @@ class MedicalSwarmGraph:
 
     async def run_fallback(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Fallback to ConsultationAgent for empty plans or disabled swarm."""
-        question = state["question"]
-        session_id = state["session_id"]
-        enhanced_context = state.get("enhanced_context") or {}
-        tool_policy = self._tool_policy_for_request(
-            question=question,
-            context=enhanced_context,
-            assessment=state.get("assessment") or {},
+        return await self._run_agent_exec(
+            agent=self.consultation_agent,
+            question=state["question"],
+            enhanced_context=state.get("enhanced_context") or {},
+            session_id=state["session_id"],
+            collector=self._get_debug_collector(state),
+            route_reason="fallback",
             task=None,
         )
 
-        result = await self.consultation_agent.process(
+    async def _run_agent_exec(
+        self,
+        agent: Any,
+        question: str,
+        enhanced_context: Dict[str, Any],
+        session_id: str,
+        collector: Any,
+        route_reason: str = "",
+        task: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Execute an agent with standard boilerplate (single_agent + fallback)."""
+        tool_policy = self._tool_policy_for_request(
+            question=question,
+            context=enhanced_context,
+            assessment={},
+            task=task or {},
+        )
+        result = await agent.process(
             {
                 "question": question,
                 "context": enhanced_context,
                 "session_id": session_id,
                 "tool_policy": tool_policy,
-                "debug_collector": self._get_debug_collector(state),
+                "debug_collector": collector,
             }
         )
         final_answer = result.get("answer", "")
@@ -475,6 +482,7 @@ class MedicalSwarmGraph:
             {
                 "swarm_enabled": False,
                 "session_id": session_id,
+                "route_reason": route_reason,
             }
         )
         result.setdefault(
@@ -482,93 +490,96 @@ class MedicalSwarmGraph:
             "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
         )
         result.setdefault("suggestions", [])
-
         return {"result": result, "final_answer": final_answer}
 
     async def save_memory(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Persist session summary and long-term memory once per workflow."""
-        end_time = datetime.now()
-        mode = state.get("mode") or state.get("route") or "unknown"
-        final_answer = (state.get("result") or {}).get("answer") or state.get("final_answer", "")
-        shared_context = state.get("shared_context")
-        collector = self._get_debug_collector(state)
+        try:
+            end_time = datetime.now()
+            mode = state.get("mode") or state.get("route") or "unknown"
+            final_answer = (state.get("result") or {}).get("answer") or state.get("final_answer", "")
+            shared_context = state.get("shared_context")
+            collector = self._get_debug_collector(state)
 
-        if not self.enable_memory:
+            if not self.enable_memory:
+                if collector:
+                    collector.record_event(
+                        "memory",
+                        name="save_memory",
+                        input={"session_id": state["session_id"], "mode": mode},
+                        output={"enabled": False, "saved": False},
+                    )
+                return {"end_time": end_time}
+
+            summary_saved = False
+            if mode == "swarm" and shared_context:
+                try:
+                    summary = SessionSummary.from_shared_context(
+                        session_id=state["session_id"],
+                        question=state["question"],
+                        shared_context=shared_context,
+                        final_answer=final_answer,
+                        start_time=state["start_time"],
+                        end_time=end_time,
+                    )
+                    self.session_manager.save_summary(summary)
+                    summary_saved = True
+                except Exception as exc:
+                    logger.error(f"Failed to generate session summary: {exc}")
+
+            long_term_saved = False
+            long_term_error = None
+            try:
+                metadata = {
+                    "mode": mode,
+                    "total_time": (end_time - state["start_time"]).total_seconds(),
+                }
+                if mode == "swarm" and shared_context:
+                    metadata.update(
+                        {
+                            "agents_count": len(shared_context.agent_contributions),
+                            "timeout_occurred": state.get("timeout_occurred", False),
+                        }
+                    )
+                else:
+                    metadata["subtasks_count"] = len(state.get("subtasks") or [])
+
+                self.long_term_memory.add_session_summary(
+                    session_id=state["session_id"],
+                    question=state["question"],
+                    answer=final_answer,
+                    metadata=metadata,
+                )
+                long_term_saved = True
+                logger.info(f"Saved to long-term memory (session={state['session_id']}, mode={mode})")
+            except Exception as exc:
+                long_term_error = str(exc)
+                logger.error(f"Failed to save to long-term memory: {exc}")
+
             if collector:
                 collector.record_event(
                     "memory",
                     name="save_memory",
-                    input={"session_id": state["session_id"], "mode": mode},
-                    output={"enabled": False, "saved": False},
+                    input={
+                        "session_id": state["session_id"],
+                        "mode": mode,
+                        "final_answer": final_answer,
+                    },
+                    output={
+                        "enabled": True,
+                        "summary_saved": summary_saved,
+                        "long_term_saved": long_term_saved,
+                        "long_term_error": long_term_error,
+                    },
+                    status="success" if long_term_error is None else "failed",
+                    error=long_term_error,
+                    metadata={
+                        "long_term_enabled": bool(getattr(self.long_term_memory, "enabled", False)),
+                    },
                 )
-            return {"end_time": end_time}
 
-        summary_saved = False
-        if mode == "swarm" and shared_context:
-            try:
-                summary = SessionSummary.from_shared_context(
-                    session_id=state["session_id"],
-                    question=state["question"],
-                    shared_context=shared_context,
-                    final_answer=final_answer,
-                    start_time=state["start_time"],
-                    end_time=end_time,
-                )
-                self.session_manager.save_summary(summary)
-                summary_saved = True
-            except Exception as exc:
-                logger.error(f"Failed to generate session summary: {exc}")
-
-        long_term_saved = False
-        long_term_error = None
-        try:
-            metadata = {
-                "mode": mode,
-                "total_time": (end_time - state["start_time"]).total_seconds(),
-            }
-            if mode == "swarm" and shared_context:
-                metadata.update(
-                    {
-                        "agents_count": len(shared_context.agent_contributions),
-                        "timeout_occurred": state.get("timeout_occurred", False),
-                    }
-                )
-            else:
-                metadata["subtasks_count"] = len(state.get("subtasks") or [])
-
-            self.long_term_memory.add_session_summary(
-                session_id=state["session_id"],
-                question=state["question"],
-                answer=final_answer,
-                metadata=metadata,
-            )
-            long_term_saved = True
-            logger.info(f"Saved to long-term memory (session={state['session_id']}, mode={mode})")
         except Exception as exc:
-            long_term_error = str(exc)
-            logger.error(f"Failed to save to long-term memory: {exc}")
-
-        if collector:
-            collector.record_event(
-                "memory",
-                name="save_memory",
-                input={
-                    "session_id": state["session_id"],
-                    "mode": mode,
-                    "final_answer": final_answer,
-                },
-                output={
-                    "enabled": True,
-                    "summary_saved": summary_saved,
-                    "long_term_saved": long_term_saved,
-                    "long_term_error": long_term_error,
-                },
-                status="success" if long_term_error is None else "failed",
-                error=long_term_error,
-                metadata={
-                    "long_term_enabled": bool(getattr(self.long_term_memory, "enabled", False)),
-                },
-            )
+            logger.error(f"save_memory failed (non-critical, response already built): {exc}")
 
         return {"end_time": end_time}
 
@@ -621,7 +632,7 @@ class MedicalSwarmGraph:
             result.setdefault("answer", final_answer)
             result.setdefault("swarm_enabled", False)
             result.setdefault("session_id", state["session_id"])
-            result.setdefault("suggestions", [])
+            result["suggestions"] = self._extract_suggestions(final_answer)
             result.setdefault(
                 "disclaimer",
                 "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
@@ -630,6 +641,29 @@ class MedicalSwarmGraph:
         result = await self._ensure_runtime_safety(state, result)
         return {"result": result}
 
+    async def _call_llm_with_retry(
+        self,
+        messages: List[Dict[str, Any]],
+        state: MedicalSwarmState,
+        max_retries: int = 2,
+    ) -> str:
+        """Call LLM with retry logic for transient failures."""
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                return await self.llm_client.chat(
+                    messages,
+                    debug_collector=self._get_debug_collector(state),
+                    trace_name="plan_and_decompose",
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    wait = 2 ** attempt
+                    logger.warning(f"LLM call failed (attempt {attempt+1}), retrying in {wait}s: {exc}")
+                    await asyncio.sleep(wait)
+        raise last_error  # type: ignore
+
     def _trace_node(
         self,
         stage: str,
@@ -637,22 +671,37 @@ class MedicalSwarmGraph:
         handler: Callable[[MedicalSwarmState], Any],
     ):
         async def wrapped(state: MedicalSwarmState) -> Dict[str, Any]:
-            collector = self._get_debug_collector(state)
-            if not collector:
-                return await handler(state)
+            async def execute_node() -> Dict[str, Any]:
+                collector = self._get_debug_collector(state)
+                if not collector:
+                    return await handler(state)
 
-            timer = collector.time_event(
-                stage,
-                input=self._debug_state_snapshot(state),
-                name=name,
+                timer = collector.time_event(
+                    stage,
+                    input=self._debug_state_snapshot(state),
+                    name=name,
+                )
+                try:
+                    output = await handler(state)
+                    timer.finish(output=output)
+                    return output
+                except Exception as exc:
+                    timer.finish(status="failed", error=str(exc), output={"error": str(exc)})
+                    raise
+
+            return await trace_async(
+                name=f"graph.{name}",
+                run_type="chain",
+                func=execute_node,
+                inputs=self._debug_state_snapshot(state),
+                metadata={
+                    "stage": stage,
+                    "node": name,
+                    "session_id": state.get("session_id"),
+                    "route": state.get("route") or state.get("mode"),
+                },
+                tags=["medical-agent-swarm", "langgraph-node", stage],
             )
-            try:
-                output = await handler(state)
-                timer.finish(output=output)
-                return output
-            except Exception as exc:
-                timer.finish(status="failed", error=str(exc), output={"error": str(exc)})
-                raise
 
         return wrapped
 
@@ -755,94 +804,80 @@ class MedicalSwarmGraph:
 
         return requested_timeout
 
+    def _assessment_from_evidence_memory(self, question: str) -> Optional[Dict[str, Any]]:
+        """Create a single-agent plan when local evidence memory has a strong hit."""
+        try:
+            hit = EvidenceMemory().lookup(question, min_score=0.9)
+        except Exception as exc:
+            logger.warning(f"Evidence memory planning lookup failed: {exc}")
+            return None
+
+        if not hit:
+            return None
+
+        memory_id = str(hit.get("id") or "")
+        # Data-driven routing: read preferred_agent from evidence entry
+        agent_id = hit.get("preferred_agent", "research_agent")
+        task_type = f"{agent_id}_task"
+        summary = str(hit.get("answer") or "")[:900]
+        description = (
+            "Use the local evidence memory below to answer the user's medical question. "
+            "Keep standard medical safety boundaries, avoid diagnosis certainty, and "
+            "recommend urgent care when red flags are present.\n\n"
+            f"User question: {question}\n\n"
+            f"Evidence memory ({memory_id}, score={hit.get('match_score')}):\n{summary}"
+        )
+
+        return {
+            "subtasks": [
+                {
+                    "type": task_type,
+                    "description": description,
+                    "assigned_agent": agent_id,
+                }
+            ],
+            "reason": "High-confidence local evidence memory hit; using single-agent plan to avoid redundant live research.",
+            "memory_id": memory_id,
+            "memory_source": hit.get("source", "evidence_memory"),
+            "memory_match_score": hit.get("match_score"),
+        }
+
     def _tool_policy_for_request(
         self,
         question: str,
         context: Optional[Dict[str, Any]] = None,
         assessment: Optional[Dict[str, Any]] = None,
         task: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Build per-request tool policy for expensive evidence research."""
-        allow_deep_research = self._allows_deep_research(
-            question=question,
-            context=context or {},
-            assessment=assessment or {},
-            task=task or {},
-        )
-        if allow_deep_research:
-            return {
-                "deny_tools": [],
-                "allow_deep_research": True,
-                "reason": "指南/循证/最新证据类请求允许 deep_research。",
-            }
-
-        return {
-            "deny_tools": ["deep_research"],
-            "allow_deep_research": False,
-            "reason": "deep_research 仅限指南、循证或最新证据类请求；基础、急症和普通症状分析默认禁用。",
-        }
-
-    def _allows_deep_research(
-        self,
-        question: str,
-        context: Dict[str, Any],
-        assessment: Dict[str, Any],
-        task: Dict[str, Any],
-    ) -> bool:
-        category = self._context_category(context)
-        if category == "指南/循证检索":
-            return True
-        if category in {"基础医学知识", "急症分诊", "症状分析", "慢病与生活方式"}:
-            return False
-
+        ) -> Dict[str, Any]:
+        """Build per-request tool policy. Only deny deep_research for urgent/emergency topics."""
         text = " ".join(
             str(part or "")
             for part in [
                 question,
-                task.get("type"),
-                task.get("description"),
-                task.get("assigned_agent"),
-                assessment.get("reason"),
+                (task or {}).get("type"),
+                (task or {}).get("description"),
+                (task or {}).get("assigned_agent"),
+                (assessment or {}).get("reason"),
             ]
         ).lower()
 
         emergency_markers = [
-            "急症",
-            "急诊",
-            "急救",
-            "立即就医",
-            "拨打120",
-            "120",
-            "胸痛",
-            "卒中",
-            "中风",
-            "喘不上气",
-            "嘴唇发紫",
-            "过敏性休克",
+            "急症", "急诊", "急救", "立即就医", "拨打120", "120",
+            "胸痛", "卒中", "中风", "喘不上气", "嘴唇发紫", "过敏性休克",
         ]
         if any(marker in text for marker in emergency_markers):
-            return False
+            return {
+                "deny_tools": ["deep_research"],
+                "allow_deep_research": False,
+                "reason": "急症场景优先使用基础技能，跳过深度研究避免响应延迟。",
+            }
 
-        evidence_markers = [
-            "指南",
-            "循证",
-            "证据",
-            "文献",
-            "最新研究",
-            "最新指南",
-            "临床指南",
-            "专家共识",
-            "系统综述",
-            "meta分析",
-            "meta-analysis",
-            "evidence",
-            "guideline",
-            "literature",
-            "clinical trial",
-            "systematic review",
-            "pubmed",
-        ]
-        return any(marker in text for marker in evidence_markers)
+        # Allow Agent (especially ResearchAgent) to autonomously decide
+        return {
+            "deny_tools": [],
+            "allow_deep_research": True,
+            "reason": "Agent 自主决定是否需要深度研究。",
+        }
 
     def _context_category(self, context: Dict[str, Any]) -> str:
         for key in ("category", "case_category", "evaluation_category"):
@@ -1073,26 +1108,11 @@ class MedicalSwarmGraph:
         state: MedicalSwarmState,
         result: Dict[str, Any],
     ) -> Dict[str, Any]:
+        """Run mandatory safety review on the final answer before returning."""
+        from core.safety_guard import SafetyGuard
+
         collector = self._get_debug_collector(state)
         risk_level = self._extract_risk_level_from_state(state)
-
-        if result.get("safety_checked") is True:
-            if collector:
-                collector.record_event(
-                    "safety_check",
-                    name="runtime_safety_guard",
-                    input={
-                        "already_checked": True,
-                        "risk_level": risk_level,
-                    },
-                    output={
-                        "skipped": True,
-                        "safety_passed": result.get("safety_passed"),
-                        "safety_issues": result.get("safety_issues", []),
-                    },
-                    status="success" if result.get("safety_passed") else "failed",
-                )
-            return result
 
         timer = None
         if collector:
@@ -1106,7 +1126,8 @@ class MedicalSwarmGraph:
                 name="runtime_safety_guard",
             )
 
-        safety_result = await self.safety_guard.review(
+        safety_guard = SafetyGuard()
+        safety_result = await safety_guard.review(
             response=result.get("answer", "") or "",
             original_question=state.get("question", "") or "",
             risk_level=risk_level,

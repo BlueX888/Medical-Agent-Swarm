@@ -1,0 +1,28 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "FastAPI Backend",
+      "runtimeExecutable": ".venv/Scripts/uvicorn",
+      "runtimeArgs": [
+        "api.server:app",
+        "--reload",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "port": 8000
+    },
+    {
+      "name": "Vite Frontend",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "--host",
+        "127.0.0.1"
+      ],
+      "port": 5173
+    }
+  ]
+}

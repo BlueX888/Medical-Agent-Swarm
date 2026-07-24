@@ -176,17 +176,8 @@ class DeepResearchWorkflow:
 
     @staticmethod
     def _dedupe_search_results(results: List[SearchResult]) -> List[SearchResult]:
-        deduped: List[SearchResult] = []
-        seen_urls = set()
-
-        for result in results:
-            normalized_url = result.url.rstrip("/")
-            if not normalized_url or normalized_url in seen_urls:
-                continue
-            seen_urls.add(normalized_url)
-            deduped.append(result)
-
-        return deduped
+        """Delegate deduplication to WebSearchTool utility method."""
+        return WebSearchTool.dedupe_results(results)
 
     async def research_with_refinement(
         self,

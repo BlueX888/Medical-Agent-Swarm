@@ -40,11 +40,11 @@ class SwarmCoordinator:
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
-        # Backward compatibility: enable_memory sets both if not overridden
-        if enable_short_term_memory is None:
-            enable_short_term_memory = enable_memory
-        if enable_long_term_memory is None:
-            enable_long_term_memory = enable_memory
+        enable_short_term_memory, enable_long_term_memory = _resolve_memory_flags(
+            enable_memory,
+            enable_short_term_memory,
+            enable_long_term_memory,
+        )
         self.enable_short_term_memory = enable_short_term_memory
         self.enable_long_term_memory = enable_long_term_memory
         self.swarm_timeout_s = swarm_timeout_s
@@ -174,15 +174,10 @@ async def process_with_swarm(
     Convenience function for processing a question through the swarm entry.
     """
     global _default_coordinator, _default_short_term_memory
-    short_term_enabled = (
-        enable_memory
-        if enable_short_term_memory is None
-        else enable_short_term_memory
-    )
-    long_term_enabled = (
-        enable_memory
-        if enable_long_term_memory is None
-        else enable_long_term_memory
+    short_term_enabled, long_term_enabled = _resolve_memory_flags(
+        enable_memory,
+        enable_short_term_memory,
+        enable_long_term_memory,
     )
     debug_collector = (
         DebugTraceCollector(
@@ -243,3 +238,19 @@ async def process_with_swarm(
         }
 
     return result
+
+
+def _resolve_memory_flags(
+    enable_memory: bool,
+    enable_short_term_memory: Optional[bool],
+    enable_long_term_memory: Optional[bool],
+) -> tuple[bool, bool]:
+    """Resolve legacy combined configuration into independent memory flags."""
+    return (
+        enable_memory
+        if enable_short_term_memory is None
+        else enable_short_term_memory,
+        enable_memory
+        if enable_long_term_memory is None
+        else enable_long_term_memory,
+    )

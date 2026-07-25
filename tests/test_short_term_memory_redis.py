@@ -1,4 +1,5 @@
 import os
+import asyncio
 import uuid
 
 import pytest
@@ -36,9 +37,15 @@ async def test_redis_backend_persists_trims_refreshes_and_clears():
             "status": "ok",
         }
 
-        for index in range(3):
+        await memory.save_turn(session_id, "问题 0", "回答 0")
+        await asyncio.sleep(2)
+        aged_ttl = await memory.get_session_ttl(session_id)
+
+        for index in range(1, 3):
             await memory.save_turn(session_id, f"问题 {index}", f"回答 {index}")
 
+        refreshed_ttl = await memory.get_session_ttl(session_id)
+        assert refreshed_ttl > aged_ttl
         assert [
             message["content"]
             for message in await second_process_memory.load_context(

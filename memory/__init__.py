@@ -8,7 +8,10 @@
 
 # 短期和长期记忆
 from .short_term import (
+    InMemoryShortTermMemoryAdapter,
+    RedisShortTermMemoryAdapter,
     ShortTermMemory,
+    ShortTermMemoryAdapter,
     MemoryMessage,
     create_short_term_memory,
 )
@@ -32,6 +35,9 @@ from .session_summary import (
 __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
+    'ShortTermMemoryAdapter',
+    'InMemoryShortTermMemoryAdapter',
+    'RedisShortTermMemoryAdapter',
     'MemoryMessage',
     'create_short_term_memory',
     'LongTermMemory',

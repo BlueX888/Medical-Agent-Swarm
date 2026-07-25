@@ -2,6 +2,7 @@ from datetime import datetime
 
 import pytest
 
+from memory import ShortTermMemory
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 
 
@@ -37,6 +38,41 @@ class DisabledLongTermMemory:
 
     def add_session_summary(self, *args, **kwargs):
         raise AssertionError("long-term memory is disabled")
+
+
+class FakeWorker:
+    def __init__(self, agent_id):
+        self.agent_id = agent_id
+        self.shared_context = None
+
+    def attach_shared_context(self, shared_context):
+        self.shared_context = shared_context
+
+    async def process_subtask(self, subtask, debug_collector=None):
+        return {"answer": f"{self.agent_id} 完成 {subtask.type}"}
+
+
+class SwarmAcceptanceGraph(MedicalSwarmGraph):
+    async def plan_and_decompose(self, state):
+        subtasks = [
+            {
+                "type": "consultation",
+                "description": "咨询分析",
+                "assigned_agent": "consultation_agent",
+            },
+            {
+                "type": "diagnostic",
+                "description": "症状分析",
+                "assigned_agent": "diagnostic_agent",
+            },
+        ]
+        return {
+            "assessment": {"subtasks": subtasks, "reason": "acceptance test"},
+            "subtasks": subtasks,
+        }
+
+    async def _synthesize_results(self, *args, **kwargs):
+        return "这是两个 Agent 汇总后的最终回答。"
 
 
 def make_graph_for_memory_nodes():
@@ -85,4 +121,39 @@ async def test_graph_saves_exactly_one_user_visible_turn():
 
     assert graph.short_term_memory.saved_turns == [
         ("session-a", "当前问题", "最终回答")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_full_swarm_workflow_persists_only_one_completed_turn():
+    memory = ShortTermMemory(storage_type="memory")
+    consultation = FakeWorker("consultation_agent")
+    diagnostic = FakeWorker("diagnostic_agent")
+    graph = SwarmAcceptanceGraph(
+        llm_client=object(),
+        worker_pool=[consultation, diagnostic],
+        consultation_agent=consultation,
+        diagnostic_agent=diagnostic,
+        research_agent=FakeWorker("research_agent"),
+        short_term_memory=memory,
+        long_term_memory=DisabledLongTermMemory(),
+        session_manager=None,
+        enable_swarm=True,
+        enable_short_term_memory=True,
+        enable_long_term_memory=False,
+    )
+
+    state = await graph.ainvoke(
+        {
+            "question": "需要多角度分析的问题",
+            "session_id": "swarm-session",
+            "context": {},
+        }
+    )
+
+    assert state["result"]["swarm_enabled"] is True
+    history = await memory.load_context("swarm-session", max_turns=10)
+    assert [(message["role"], message["content"]) for message in history] == [
+        ("user", "需要多角度分析的问题"),
+        ("assistant", state["result"]["answer"]),
     ]

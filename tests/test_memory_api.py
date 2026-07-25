@@ -1,17 +1,38 @@
 import asyncio
+import time
 
 from fastapi.testclient import TestClient
 
-from api.server import app
+import api.server as server
 from memory import ShortTermMemory
 
 
-def test_memory_api_uses_application_memory_and_can_clear_a_session():
+def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch):
     memory = ShortTermMemory(storage_type="memory", ttl_seconds=60)
-    asyncio.run(memory.save_turn("session-api", "问题", "回答"))
 
-    with TestClient(app) as client:
-        app.state.short_term_memory = memory
+    async def save_without_calling_a_model(
+        coordinator,
+        question,
+        context=None,
+        session_id=None,
+        **kwargs,
+    ):
+        assert coordinator.short_term_memory is memory
+        await coordinator.short_term_memory.save_turn(
+            session_id,
+            question,
+            "回答",
+        )
+        return {"answer": "回答", "session_id": session_id}
+
+    monkeypatch.setattr(
+        server.SwarmCoordinator,
+        "process",
+        save_without_calling_a_model,
+    )
+
+    with TestClient(server.app) as client:
+        server.app.state.short_term_memory = memory
 
         health = client.get("/api/health")
         assert health.status_code == 200
@@ -19,6 +40,22 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session():
             "backend": "memory",
             "status": "ok",
         }
+
+        created = client.post(
+            "/api/runs",
+            json={
+                "question": "问题",
+                "session_id": "session-api",
+                "enable_memory": True,
+            },
+        )
+        assert created.status_code == 200
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if asyncio.run(memory.load_context("session-api")):
+                break
+            time.sleep(0.01)
 
         response = client.get("/api/sessions/session-api/memory")
         assert response.status_code == 200

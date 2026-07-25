@@ -10,6 +10,8 @@ class RunCreateRequest(BaseModel):
     session_id: Optional[str] = None
     enable_swarm: bool = True
     enable_memory: bool = True
+    enable_short_term_memory: Optional[bool] = None
+    enable_long_term_memory: Optional[bool] = None
 
 
 class RunCreateResponse(BaseModel):
@@ -45,6 +47,13 @@ class AgentInfo(BaseModel):
 
 class MemoryResponse(BaseModel):
     session_id: str
+    backend: str
+    ttl_seconds: int
     recent_history: List[Dict[str, Any]]
     historical_cases: List[Dict[str, Any]]
     long_term_enabled: bool
+
+
+class MemoryClearResponse(BaseModel):
+    session_id: str
+    cleared: bool

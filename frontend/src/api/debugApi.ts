@@ -2,6 +2,7 @@ import {
   AgentInfo,
   DebugEvent,
   DebugRun,
+  MemoryClearResponse,
   MemoryResponse,
   RunCreatePayload,
   RunCreateResponse,
@@ -21,8 +22,11 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // 健康检查只用于前端显示后端可用性，不参与业务流程判断。
-export async function getHealth(): Promise<{ status: string }> {
-  return requestJson<{ status: string }>("/api/health");
+export async function getHealth(): Promise<{
+  status: string;
+  memory: { backend: string; status: string };
+}> {
+  return requestJson("/api/health");
 }
 
 // 创建 run 后后端会立刻返回 run_id，真正的 Agent 执行在后台异步进行。
@@ -73,4 +77,11 @@ export async function getSessionMemory(
     params.set("query", query.trim());
   }
   return requestJson<MemoryResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/memory?${params}`);
+}
+
+export async function clearSessionMemory(sessionId: string): Promise<MemoryClearResponse> {
+  return requestJson<MemoryClearResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/memory`,
+    { method: "DELETE" }
+  );
 }

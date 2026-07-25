@@ -1,0 +1,97 @@
+import asyncio
+from unittest.mock import ANY
+
+import pytest
+
+from memory import ShortTermMemory, create_short_term_memory
+
+
+@pytest.mark.asyncio
+async def test_saved_turn_is_loaded_in_conversation_order():
+    memory = ShortTermMemory(storage_type="memory")
+
+    await memory.save_turn(
+        session_id="session-a",
+        user_message="我最近一直头痛",
+        assistant_message="请先留意是否伴随高热或神经系统症状。",
+    )
+
+    assert await memory.load_context("session-a") == [
+        {
+            "role": "user",
+            "content": "我最近一直头痛",
+            "timestamp": ANY,
+        },
+        {
+            "role": "assistant",
+            "content": "请先留意是否伴随高热或神经系统症状。",
+            "timestamp": ANY,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns():
+    memory = ShortTermMemory(storage_type="memory", max_messages=4)
+
+    for index in range(3):
+        await memory.save_turn(
+            "session-a",
+            f"问题 {index}",
+            f"回答 {index}",
+        )
+    await memory.save_turn("session-b", "另一会话", "另一回答")
+
+    assert [
+        (message["role"], message["content"])
+        for message in await memory.load_context("session-a", max_turns=10)
+    ] == [
+        ("user", "问题 1"),
+        ("assistant", "回答 1"),
+        ("user", "问题 2"),
+        ("assistant", "回答 2"),
+    ]
+    assert [
+        message["content"]
+        for message in await memory.load_context("session-b", max_turns=10)
+    ] == ["另一会话", "另一回答"]
+
+
+@pytest.mark.asyncio
+async def test_session_can_be_cleared_and_expires_after_inactivity():
+    memory = ShortTermMemory(storage_type="memory", ttl_seconds=1)
+    await memory.save_turn("clear-me", "问题", "回答")
+
+    assert await memory.get_session_ttl("clear-me") > 0
+    assert await memory.clear_session("clear-me") is True
+    assert await memory.load_context("clear-me") == []
+    assert await memory.clear_session("clear-me") is False
+
+    await memory.save_turn("expire-me", "问题", "回答")
+    await asyncio.sleep(1.05)
+
+    assert await memory.load_context("expire-me") == []
+    assert await memory.get_session_ttl("expire-me") == -2
+
+
+@pytest.mark.asyncio
+async def test_health_reports_the_active_backend():
+    memory = ShortTermMemory(storage_type="memory")
+
+    assert await memory.health() == {
+        "backend": "memory",
+        "status": "ok",
+    }
+
+
+@pytest.mark.asyncio
+async def test_configured_redis_falls_back_to_memory_when_unavailable(monkeypatch):
+    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")
+
+    memory = await create_short_term_memory()
+
+    assert await memory.health() == {
+        "backend": "memory",
+        "status": "ok",
+    }

@@ -12,12 +12,11 @@ MEM0_CONFIG = {
     "api_key": "m0-your-mem0-key",
 }
 
-# Redis config (Short-term memory, optional)
-# REDIS_CONFIG = {
-#     "host": "localhost",
-#     "port": 6379,
-#     "db": 0,
-# }
+# Short-term memory is configured with environment variables:
+#   SHORT_TERM_MEMORY_BACKEND=redis  # memory or redis
+#   REDIS_URL=redis://localhost:6379/0
+#   SHORT_TERM_MEMORY_TTL=86400
+#   SHORT_TERM_MEMORY_MAX_MESSAGES=40
 
 # LangSmith observability is configured with environment variables:
 #   LANGSMITH_TRACING=true

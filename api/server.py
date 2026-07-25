@@ -3,21 +3,23 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.skill_loader import discover_skills, is_active_skill
 from debug import DebugTraceCollector, InMemoryTraceStore
-from memory import LongTermMemory, ShortTermMemory
+from memory import LongTermMemory, ShortTermMemory, create_short_term_memory
 from swarm import SwarmCoordinator
 
 from .schemas import (
     AgentInfo,
     DebugEventsResponse,
     DebugRunResponse,
+    MemoryClearResponse,
     MemoryResponse,
     RunCreateRequest,
     RunCreateResponse,
@@ -27,12 +29,22 @@ from .schemas import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUN_STORE = InMemoryTraceStore()
-SHORT_TERM_MEMORY = ShortTermMemory(storage_type="memory")
 LONG_TERM_MEMORY = LongTermMemory()
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    application.state.short_term_memory = await create_short_term_memory()
+    try:
+        yield
+    finally:
+        await application.state.short_term_memory.close()
+
 
 app = FastAPI(
     title="Medical-Agent-Swarm Debug API",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -50,12 +62,16 @@ app.add_middleware(
 
 
 @app.get("/api/health")
-async def health() -> Dict[str, str]:
-    return {"status": "ok"}
+async def health(request: Request) -> Dict[str, Any]:
+    memory_health = await _short_term_memory(request).health()
+    return {
+        "status": "ok" if memory_health["status"] == "ok" else "degraded",
+        "memory": memory_health,
+    }
 
 
 @app.post("/api/runs", response_model=RunCreateResponse)
-async def create_run(payload: RunCreateRequest) -> RunCreateResponse:
+async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateResponse:
     collector = DebugTraceCollector(
         question=payload.question,
         context=payload.context,
@@ -64,12 +80,16 @@ async def create_run(payload: RunCreateRequest) -> RunCreateResponse:
             "source": "api",
             "enable_swarm": payload.enable_swarm,
             "enable_memory": payload.enable_memory,
+            "enable_short_term_memory": payload.enable_short_term_memory,
+            "enable_long_term_memory": payload.enable_long_term_memory,
             "context_keys": sorted(payload.context.keys()),
         },
     )
     RUN_STORE.add(collector)
 
-    asyncio.create_task(_execute_run(payload, collector))
+    asyncio.create_task(
+        _execute_run(payload, collector, _short_term_memory(request))
+    )
 
     run = collector.get_run().to_dict()
     return RunCreateResponse(
@@ -138,11 +158,17 @@ async def get_agents(enable_swarm: bool = True) -> List[AgentInfo]:
 
 @app.get("/api/sessions/{session_id}/memory", response_model=MemoryResponse)
 async def get_session_memory(
+    request: Request,
     session_id: str,
     query: Optional[str] = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> MemoryResponse:
-    recent_history = SHORT_TERM_MEMORY.get_recent_messages(session_id=session_id, limit=limit)
+    short_term_memory = _short_term_memory(request)
+    recent_history = await short_term_memory.load_context(
+        session_id=session_id,
+        max_turns=max(1, (limit + 1) // 2),
+    )
+    recent_history = recent_history[-limit:]
     historical_cases = (
         LONG_TERM_MEMORY.search_similar_sessions(query=query, limit=min(limit, 10))
         if query
@@ -150,17 +176,38 @@ async def get_session_memory(
     )
     return MemoryResponse(
         session_id=session_id,
+        backend=short_term_memory.backend_name,
+        ttl_seconds=await short_term_memory.get_session_ttl(session_id),
         recent_history=recent_history,
         historical_cases=historical_cases,
         long_term_enabled=bool(getattr(LONG_TERM_MEMORY, "enabled", False)),
     )
 
 
-async def _execute_run(payload: RunCreateRequest, collector: DebugTraceCollector) -> None:
+@app.delete(
+    "/api/sessions/{session_id}/memory",
+    response_model=MemoryClearResponse,
+)
+async def clear_session_memory(
+    request: Request,
+    session_id: str,
+) -> MemoryClearResponse:
+    cleared = await _short_term_memory(request).clear_session(session_id)
+    return MemoryClearResponse(session_id=session_id, cleared=cleared)
+
+
+async def _execute_run(
+    payload: RunCreateRequest,
+    collector: DebugTraceCollector,
+    short_term_memory: ShortTermMemory,
+) -> None:
     try:
         coordinator = SwarmCoordinator(
             enable_swarm=payload.enable_swarm,
             enable_memory=payload.enable_memory,
+            enable_short_term_memory=payload.enable_short_term_memory,
+            enable_long_term_memory=payload.enable_long_term_memory,
+            short_term_memory=short_term_memory,
         )
         await coordinator.process(
             question=payload.question,
@@ -170,6 +217,10 @@ async def _execute_run(payload: RunCreateRequest, collector: DebugTraceCollector
         )
     except Exception as exc:
         collector.finish_failed(exc)
+
+
+def _short_term_memory(request: Request) -> ShortTermMemory:
+    return request.app.state.short_term_memory
 
 
 def _get_collector_or_404(run_id: str) -> DebugTraceCollector:

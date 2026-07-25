@@ -9,7 +9,8 @@
 # 短期和长期记忆
 from .short_term import (
     ShortTermMemory,
-    ConversationHistory
+    MemoryMessage,
+    create_short_term_memory,
 )
 from .long_term import (
     LongTermMemory
@@ -31,7 +32,8 @@ from .session_summary import (
 __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
-    'ConversationHistory',
+    'MemoryMessage',
+    'create_short_term_memory',
     'LongTermMemory',
     'EvidenceMemory',
     # 本地持久化类

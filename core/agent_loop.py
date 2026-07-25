@@ -1,7 +1,7 @@
 """
 Agent循环引擎
 实现 LLM 驱动的 Skill 调用循环
-支持短期记忆集成
+消费由工作流注入的会话历史
 支持约束验证（Harness Engineering）
 """
 import uuid
@@ -31,22 +31,20 @@ class AgentLoop:
     LLM 自主决策 Skill 调用，循环直到任务完成
 
     功能：
-    - 支持短期记忆（ShortTermMemory）
-    - 自动记录每轮的 user/assistant 消息
+    - 消费请求中已经加载好的会话历史
+    - 不直接读写持久化记忆
     """
 
-    def __init__(self, max_iterations: int = 10, short_term_memory: Optional[Any] = None, max_tool_calls: int = 4):
+    def __init__(self, max_iterations: int = 10, max_tool_calls: int = 4):
         """
         初始化Agent循环引擎
 
         Args:
             max_iterations: 最大迭代次数（防止无限循环）
-            short_term_memory: 短期记忆管理器（可选）
             max_tool_calls: 最大 Skill 调用次数（硬性限制，默认4次；可通过 Agent 类型覆盖）
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
-        self.short_term_memory = short_term_memory
         self.tool_call_count = 0
 
         # Harness Engineering: runtime behavior constraint validator
@@ -148,7 +146,6 @@ class AgentLoop:
 
             # 初始化消息历史（包含历史对话）
             messages = self._initialize_messages(agent, loop_input_data, session_id)
-            original_user_message = messages[-1]["content"] if messages else str(loop_input_data)
             latest_risk_level = ""
             if debug_collector:
                 role_counts: Dict[str, int] = {}
@@ -161,7 +158,9 @@ class AgentLoop:
                     name="initialize_messages",
                     input={
                         "session_id": session_id,
-                        "short_term_memory_enabled": bool(self.short_term_memory),
+                        "conversation_history_provided": bool(
+                            loop_input_data.get("conversation_history")
+                        ),
                     },
                     output={
                         "message_count": len(messages),
@@ -172,15 +171,6 @@ class AgentLoop:
                         "history_message_count": max(0, len(messages) - 2),
                     },
                 )
-
-            # 记录用户消息到短期记忆
-            if self.short_term_memory and session_id:
-                self.short_term_memory.add_message(
-                    session_id=session_id,
-                    role="user",
-                    content=original_user_message
-                )
-                logger.debug(f"Recorded user message to short-term memory (session={session_id})")
 
             # 获取 Agent 的 Skills (OpenAI format)
             tool_policy = self._normalize_tool_policy(loop_input_data.get("tool_policy"))
@@ -237,15 +227,6 @@ class AgentLoop:
 
                         # 添加 assistant 消息（包含 tool_calls）
                         messages.append(self._create_assistant_message_with_tools(llm_response))
-
-                        # 记录 assistant 消息到短期记忆
-                        if self.short_term_memory and session_id:
-                            tool_names = [tc.name for tc in llm_response.tool_calls]
-                            self.short_term_memory.add_message(
-                                session_id=session_id,
-                                role="assistant",
-                                content=f"调用工具：{', '.join(tool_names)}"
-                            )
 
                         # 执行每个 Skill 调用
                         for tool_call in llm_response.tool_calls:
@@ -390,15 +371,6 @@ class AgentLoop:
                                 )
                             )
 
-                            # 记录结果到短期记忆
-                            if self.short_term_memory and session_id:
-                                result_summary = str(tool_result)[:200]
-                                self.short_term_memory.add_message(
-                                    session_id=session_id,
-                                    role="tool",
-                                    content=f"{tool_call.name}: {result_summary}"
-                                )
-
                         # 继续下一轮循环
                         continue
 
@@ -408,15 +380,6 @@ class AgentLoop:
 
                         # Final-answer content safety is centralized in SafetyGuard.
                         final_answer = llm_response.content
-
-                        # 记录最终回答到短期记忆
-                        if self.short_term_memory and session_id:
-                            self.short_term_memory.add_message(
-                                session_id=session_id,
-                                role="assistant",
-                                content=final_answer or "(empty response)"
-                            )
-                            logger.debug(f"Recorded final answer to short-term memory (session={session_id})")
 
                         result = {
                             'answer': final_answer,
@@ -476,14 +439,6 @@ class AgentLoop:
                         'safety_issues': [],
                     }
 
-                    # 记录最终回答到短期记忆
-                    if self.short_term_memory and session_id:
-                        self.short_term_memory.add_message(
-                            session_id=session_id,
-                            role="assistant",
-                            content=result['answer']
-                        )
-
                     state.mark_completed(result)
                     logger.info("Generated fallback answer after max iterations")
 
@@ -535,12 +490,21 @@ class AgentLoop:
                 'content': system_prompt
             })
 
-        # 加载历史对话（短期记忆）
-        if self.short_term_memory and session_id:
-            history = self.short_term_memory.get_history(session_id, limit=5)  # 最近5轮对话
-            if history:
-                logger.info(f"Loaded {len(history)} historical messages from short-term memory")
-                messages.extend(history)
+        # 会话历史由工作流统一加载，AgentLoop 只消费，不接触存储。
+        history = input_data.get("conversation_history") or []
+        normalized_history = [
+            {
+                "role": message["role"],
+                "content": message["content"],
+            }
+            for message in history
+            if isinstance(message, dict)
+            and message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+        ]
+        if normalized_history:
+            logger.info(f"Loaded {len(normalized_history)} conversation history messages")
+            messages.extend(normalized_history)
 
         # 用户输入
         user_message = agent.format_user_input(input_data)

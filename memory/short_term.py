@@ -1,276 +1,360 @@
-"""
-短期记忆：会话级对话历史管理
+"""Session-scoped short-term conversation memory.
 
-功能：
-- 管理会话级的对话历史（messages）
-- 支持两种存储后端：内存（默认）和 Redis（可选）
-- 自动过期机制（Redis 1小时）
+Only completed, user-visible turns belong here. Agent scratch messages, tool
+results, and debug traces stay in their request-local stores.
 """
-from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+
+from __future__ import annotations
+
 import json
+import math
+import os
+import time
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
 from loguru import logger
 
 
-@dataclass
-class ConversationHistory:
-    """对话历史数据类"""
-    session_id: str
-    messages: List[Dict[str, str]] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
-    last_updated: datetime = field(default_factory=datetime.now)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+load_dotenv()
 
-    def add_message(self, role: str, content: str):
-        """添加消息"""
-        self.messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat()
-        })
-        self.last_updated = datetime.now()
+DEFAULT_TTL_SECONDS = 24 * 60 * 60
+DEFAULT_MAX_MESSAGES = 40
+DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+KEY_PREFIX = "medical-agent-swarm:stm"
 
-    def get_recent_messages(self, limit: int = 50) -> List[Dict[str, str]]:
-        """获取最近的消息"""
-        return self.messages[-limit:]
 
-    def to_dict(self) -> Dict[str, Any]:
-        """转换为字典（用于 Redis 存储）"""
-        return {
-            "session_id": self.session_id,
-            "messages": self.messages,
-            "created_at": self.created_at.isoformat(),
-            "last_updated": self.last_updated.isoformat(),
-            "metadata": self.metadata
-        }
+@dataclass(frozen=True)
+class MemoryMessage:
+    """A single user-visible conversation message."""
+
+    role: str
+    content: str
+    timestamp: str
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ConversationHistory":
-        """从字典创建（从 Redis 加载）"""
+    def create(cls, role: str, content: str) -> "MemoryMessage":
         return cls(
-            session_id=data["session_id"],
-            messages=data["messages"],
-            created_at=datetime.fromisoformat(data["created_at"]),
-            last_updated=datetime.fromisoformat(data["last_updated"]),
-            metadata=data.get("metadata", {})
+            role=role,
+            content=content,
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )
+
+    def to_dict(self) -> Dict[str, str]:
+        return asdict(self)
+
+
+@dataclass
+class _InMemorySession:
+    messages: List[Dict[str, str]]
+    expires_at: float
 
 
 class ShortTermMemory:
-    """
-    短期记忆管理器
-
-    支持两种存储后端：
-    1. memory：纯内存存储（默认，快速但不持久）
-    2. redis：Redis 存储（可选，持久但需要 Redis 服务）
-
-    注意：不再使用单例模式。每个调用方获得独立实例，避免跨请求数据泄漏。
-    如果需要跨请求共享状态，使用外部存储（Redis）。
-
-    使用场景：
-    - 管理单次会话的对话历史
-    - Agent Loop 中的消息记录
-    - 会话结束后转换为长期记忆
-    """
+    """Deep module hiding in-memory and Redis conversation storage details."""
 
     def __init__(
         self,
         storage_type: str = "memory",
-        redis_config: Optional[Dict[str, Any]] = None
+        redis_config: Optional[Dict[str, Any]] = None,
+        *,
+        redis_url: Optional[str] = None,
+        ttl_seconds: int = DEFAULT_TTL_SECONDS,
+        max_messages: int = DEFAULT_MAX_MESSAGES,
     ):
-        """
-        初始化短期记忆管理器
+        if storage_type not in {"memory", "redis"}:
+            raise ValueError("storage_type must be 'memory' or 'redis'")
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be greater than zero")
+        if max_messages < 2:
+            raise ValueError("max_messages must be at least two")
 
-        Args:
-            storage_type: 存储类型，"memory" 或 "redis"
-            redis_config: Redis 配置（storage_type="redis" 时需要）
-        """
+        # Complete turns always contain two messages.
         self.storage_type = storage_type
-        self.sessions: Dict[str, ConversationHistory] = {}
-        self.redis_client = None
-        self._initialized = True
+        self.ttl_seconds = int(ttl_seconds)
+        self.max_messages = int(max_messages) - (int(max_messages) % 2)
+        self._sessions: Dict[str, _InMemorySession] = {}
+        self._redis = None
 
         if storage_type == "redis":
-            try:
-                import redis
-                config = redis_config or {}
-                self.redis_client = redis.Redis(
-                    host=config.get("host", "localhost"),
-                    port=config.get("port", 6379),
-                    db=config.get("db", 0),
-                    password=config.get("password"),
-                    decode_responses=True
-                )
-                # 测试连接
-                self.redis_client.ping()
-                logger.info("ShortTermMemory initialized with Redis")
-            except Exception as e:
-                logger.error(f"Failed to connect to Redis: {e}. Falling back to memory storage.")
-                self.storage_type = "memory"
-                self.redis_client = None
-        else:
-            logger.info("ShortTermMemory initialized with in-memory storage")
+            self._redis = self._create_redis_client(
+                redis_url=redis_url,
+                redis_config=redis_config or {},
+            )
 
-    def create_session(
-        self,
-        session_id: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> ConversationHistory:
-        """
-        创建新会话
-
-        Args:
-            session_id: 会话ID
-            metadata: 会话元数据
-
-        Returns:
-            ConversationHistory 对象
-        """
-        history = ConversationHistory(
-            session_id=session_id,
-            metadata=metadata or {}
+        logger.info(
+            "ShortTermMemory initialized "
+            f"(backend={self.storage_type}, ttl={self.ttl_seconds}s, "
+            f"max_messages={self.max_messages})"
         )
 
-        if self.storage_type == "memory":
-            self.sessions[session_id] = history
-        elif self.storage_type == "redis" and self.redis_client:
-            self._save_to_redis(history)
+    @property
+    def backend_name(self) -> str:
+        return self.storage_type
 
-        logger.debug(f"Created session: {session_id}")
-        return history
-
-    def add_message(
+    async def load_context(
         self,
         session_id: str,
-        role: str,
-        content: str
-    ):
-        """
-        添加消息到会话历史
-
-        Args:
-            session_id: 会话ID
-            role: 消息角色（user/assistant/tool）
-            content: 消息内容
-        """
-        history = self.get_session(session_id)
-
-        if history is None:
-            history = self.create_session(session_id)
-
-        history.add_message(role, content)
-
-        # 保存到存储
-        if self.storage_type == "redis" and self.redis_client:
-            self._save_to_redis(history)
-
-        logger.debug(f"Added {role} message to session {session_id}")
-
-    def get_session(self, session_id: str) -> Optional[ConversationHistory]:
-        """
-        获取会话历史
-
-        Args:
-            session_id: 会话ID
-
-        Returns:
-            ConversationHistory 对象，如果不存在返回 None
-        """
-        if self.storage_type == "memory":
-            return self.sessions.get(session_id)
-        elif self.storage_type == "redis" and self.redis_client:
-            return self._load_from_redis(session_id)
-        return None
-
-    def get_recent_messages(
-        self,
-        session_id: str,
-        limit: int = 50
+        max_turns: int = 5,
     ) -> List[Dict[str, str]]:
-        """
-        获取最近的消息
+        """Load recent complete turns in chronological OpenAI message order."""
+        self._validate_session_id(session_id)
+        if max_turns <= 0:
+            return []
 
-        Args:
-            session_id: 会话ID
-            limit: 最大消息数
+        message_limit = max_turns * 2
+        if self.storage_type == "redis":
+            return await self._load_redis(session_id, message_limit)
+        return self._load_memory(session_id, message_limit)
 
-        Returns:
-            消息列表
-        """
-        history = self.get_session(session_id)
-        if history:
-            return history.get_recent_messages(limit)
-        return []
-
-    def get_history(
+    async def save_turn(
         self,
         session_id: str,
-        limit: int = 10
-    ) -> List[Dict[str, str]]:
-        """
-        获取历史对话（OpenAI 格式，用于 Agent Loop）
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """Atomically append one completed user/assistant turn."""
+        self._validate_session_id(session_id)
+        if not isinstance(user_message, str) or not user_message.strip():
+            raise ValueError("user_message must be a non-empty string")
+        if not isinstance(assistant_message, str) or not assistant_message.strip():
+            raise ValueError("assistant_message must be a non-empty string")
 
-        Args:
-            session_id: 会话ID
-            limit: 最大轮数（一轮 = user + assistant）
-
-        Returns:
-            消息列表（OpenAI 格式: [{"role": "user", "content": "..."}, ...]）
-        """
-        # 获取最近消息，只做格式转换
-        messages = self.get_recent_messages(session_id, limit * 2)  # 每轮2条消息
-
-        # 转换为 OpenAI 格式（只保留 user 和 assistant 消息）
-        openai_messages = [
-            {"role": msg["role"], "content": msg["content"]}
-            for msg in messages
-            if msg["role"] in ["user", "assistant"]
+        messages = [
+            MemoryMessage.create("user", user_message).to_dict(),
+            MemoryMessage.create("assistant", assistant_message).to_dict(),
         ]
+        if self.storage_type == "redis":
+            await self._save_redis(session_id, messages)
+        else:
+            self._save_memory(session_id, messages)
 
-        return openai_messages
+    async def clear_session(self, session_id: str) -> bool:
+        """Delete a session, returning whether it existed."""
+        self._validate_session_id(session_id)
+        if self.storage_type == "redis":
+            try:
+                return bool(await self._redis.delete(self._key(session_id)))
+            except Exception as exc:
+                logger.warning(f"Failed to clear Redis short-term memory: {exc}")
+                return False
 
-    def clear_session(self, session_id: str):
-        """
-        清空会话
+        self._purge_expired_memory_session(session_id)
+        return self._sessions.pop(session_id, None) is not None
 
-        Args:
-            session_id: 会话ID
-        """
+    async def get_session_ttl(self, session_id: str) -> int:
+        """Return remaining seconds, using Redis TTL conventions (-2 = absent)."""
+        self._validate_session_id(session_id)
+        if self.storage_type == "redis":
+            try:
+                return int(await self._redis.ttl(self._key(session_id)))
+            except Exception as exc:
+                logger.warning(f"Failed to read Redis short-term memory TTL: {exc}")
+                return -2
+
+        self._purge_expired_memory_session(session_id)
+        session = self._sessions.get(session_id)
+        if session is None:
+            return -2
+        return max(1, math.ceil(session.expires_at - time.monotonic()))
+
+    async def health(self) -> Dict[str, str]:
+        """Report whether the selected backend is available."""
         if self.storage_type == "memory":
-            self.sessions.pop(session_id, None)
-        elif self.storage_type == "redis" and self.redis_client:
-            key = f"session:{session_id}"
-            self.redis_client.delete(key)
-
-        logger.debug(f"Cleared session: {session_id}")
-
-    def _save_to_redis(self, history: ConversationHistory):
-        """保存到 Redis（内部方法）"""
-        if not self.redis_client:
-            return
+            return {"backend": "memory", "status": "ok"}
 
         try:
-            key = f"session:{history.session_id}"
-            value = json.dumps(history.to_dict())
-            # 设置过期时间：1小时（3600秒）
-            self.redis_client.setex(key, 3600, value)
-        except Exception as e:
-            logger.error(f"Failed to save to Redis: {e}")
+            await self._redis.ping()
+            return {"backend": "redis", "status": "ok"}
+        except Exception as exc:
+            logger.warning(f"Redis short-term memory health check failed: {exc}")
+            return {"backend": "redis", "status": "degraded"}
 
-    def _load_from_redis(self, session_id: str) -> Optional[ConversationHistory]:
-        """从 Redis 加载（内部方法）"""
-        if not self.redis_client:
-            return None
+    async def close(self) -> None:
+        """Release backend connections when supported."""
+        if self.storage_type == "redis" and self._redis is not None:
+            close = getattr(self._redis, "aclose", None) or getattr(self._redis, "close", None)
+            if close:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
 
+    def _load_memory(
+        self,
+        session_id: str,
+        message_limit: int,
+    ) -> List[Dict[str, str]]:
+        self._purge_expired_memory_session(session_id)
+        session = self._sessions.get(session_id)
+        if session is None:
+            return []
+        return [dict(message) for message in session.messages[-message_limit:]]
+
+    def _save_memory(
+        self,
+        session_id: str,
+        messages: List[Dict[str, str]],
+    ) -> None:
+        self._purge_expired_memory_session(session_id)
+        existing = self._sessions.get(session_id)
+        history = list(existing.messages) if existing else []
+        history.extend(messages)
+        self._sessions[session_id] = _InMemorySession(
+            messages=history[-self.max_messages :],
+            expires_at=time.monotonic() + self.ttl_seconds,
+        )
+
+    async def _load_redis(
+        self,
+        session_id: str,
+        message_limit: int,
+    ) -> List[Dict[str, str]]:
         try:
-            key = f"session:{session_id}"
-            value = self.redis_client.get(key)
-
-            if value:
+            values = await self._redis.lrange(
+                self._key(session_id),
+                -message_limit,
+                -1,
+            )
+            messages = []
+            for value in values:
                 data = json.loads(value)
-                return ConversationHistory.from_dict(data)
-        except Exception as e:
-            logger.error(f"Failed to load from Redis: {e}")
+                if data.get("role") in {"user", "assistant"}:
+                    messages.append(
+                        {
+                            "role": str(data["role"]),
+                            "content": str(data.get("content", "")),
+                            "timestamp": str(data.get("timestamp", "")),
+                        }
+                    )
+            return messages
+        except Exception as exc:
+            logger.warning(f"Failed to load Redis short-term memory: {exc}")
+            return []
 
-        return None
+    async def _save_redis(
+        self,
+        session_id: str,
+        messages: List[Dict[str, str]],
+    ) -> None:
+        key = self._key(session_id)
+        serialized = [
+            json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+            for message in messages
+        ]
+        try:
+            async with self._redis.pipeline(transaction=True) as pipeline:
+                pipeline.rpush(key, *serialized)
+                pipeline.ltrim(key, -self.max_messages, -1)
+                pipeline.expire(key, self.ttl_seconds)
+                await pipeline.execute()
+        except Exception as exc:
+            logger.warning(f"Failed to save Redis short-term memory: {exc}")
+            raise
+
+    def _purge_expired_memory_session(self, session_id: str) -> None:
+        session = self._sessions.get(session_id)
+        if session and session.expires_at <= time.monotonic():
+            self._sessions.pop(session_id, None)
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> None:
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("session_id must be a non-empty string")
+
+    @staticmethod
+    def _key(session_id: str) -> str:
+        return f"{KEY_PREFIX}:{session_id}"
+
+    @staticmethod
+    def _create_redis_client(
+        redis_url: Optional[str],
+        redis_config: Dict[str, Any],
+    ):
+        try:
+            from redis.asyncio import Redis
+        except ImportError as exc:
+            raise RuntimeError(
+                "Redis backend requires the 'redis' package. "
+                "Install project requirements first."
+            ) from exc
+
+        if redis_url:
+            return Redis.from_url(
+                redis_url,
+                decode_responses=True,
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
+            )
+
+        if redis_config:
+            return Redis(
+                host=redis_config.get("host", "localhost"),
+                port=int(redis_config.get("port", 6379)),
+                db=int(redis_config.get("db", 0)),
+                password=redis_config.get("password"),
+                decode_responses=True,
+                socket_connect_timeout=1.0,
+                socket_timeout=1.0,
+            )
+
+        return Redis.from_url(
+            DEFAULT_REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=1.0,
+            socket_timeout=1.0,
+        )
+
+
+async def create_short_term_memory() -> ShortTermMemory:
+    """Create the configured backend, falling back to memory for the demo."""
+    storage_type = os.getenv("SHORT_TERM_MEMORY_BACKEND", "memory").strip().lower()
+    ttl_seconds = _positive_int_env(
+        "SHORT_TERM_MEMORY_TTL",
+        DEFAULT_TTL_SECONDS,
+    )
+    max_messages = _positive_int_env(
+        "SHORT_TERM_MEMORY_MAX_MESSAGES",
+        DEFAULT_MAX_MESSAGES,
+    )
+
+    if storage_type == "redis":
+        try:
+            memory = ShortTermMemory(
+                storage_type="redis",
+                redis_url=os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
+                ttl_seconds=ttl_seconds,
+                max_messages=max_messages,
+            )
+            if (await memory.health())["status"] == "ok":
+                return memory
+            await memory.close()
+        except Exception as exc:
+            logger.warning(f"Redis unavailable; falling back to memory: {exc}")
+    elif storage_type != "memory":
+        logger.warning(
+            f"Unknown SHORT_TERM_MEMORY_BACKEND={storage_type!r}; "
+            "falling back to memory"
+        )
+
+    return ShortTermMemory(
+        storage_type="memory",
+        ttl_seconds=ttl_seconds,
+        max_messages=max_messages,
+    )
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        logger.warning(f"Invalid {name}={raw_value!r}; using {default}")
+        return default
+    if value <= 0:
+        logger.warning(f"{name} must be positive; using {default}")
+        return default
+    return value

@@ -39,7 +39,8 @@ class MedicalSwarmGraph:
         long_term_memory: LongTermMemory,
         session_manager: SessionSummaryManager,
         enable_swarm: bool = True,
-        enable_memory: bool = True,
+        enable_short_term_memory: bool = True,
+        enable_long_term_memory: bool = True,
         swarm_timeout: float = 120.0,
         swarm_timeout_grace_s: float = 10.0,
     ):
@@ -52,7 +53,8 @@ class MedicalSwarmGraph:
         self.long_term_memory = long_term_memory
         self.session_manager = session_manager
         self.enable_swarm = enable_swarm
-        self.enable_memory = enable_memory
+        self.enable_short_term_memory = enable_short_term_memory
+        self.enable_long_term_memory = enable_long_term_memory
         self.swarm_timeout = swarm_timeout
         self.swarm_timeout_grace_s = swarm_timeout_grace_s
 
@@ -113,7 +115,8 @@ class MedicalSwarmGraph:
                 metadata={
                     **(collector.get_run().metadata or {}),
                     "enable_swarm": self.enable_swarm,
-                    "enable_memory": self.enable_memory,
+                    "enable_short_term_memory": self.enable_short_term_memory,
+                    "enable_long_term_memory": self.enable_long_term_memory,
                     "swarm_timeout": self.swarm_timeout,
                     "worker_count": len(self.worker_pool),
                     "source": "api",
@@ -145,7 +148,7 @@ class MedicalSwarmGraph:
         session_id = state["session_id"]
         context = dict(state.get("context") or {})
 
-        if not self.enable_memory:
+        if not self.enable_short_term_memory and not self.enable_long_term_memory:
             collector = self._get_debug_collector(state)
             if collector:
                 collector.record_event(
@@ -167,21 +170,26 @@ class MedicalSwarmGraph:
                 "enhanced_context": context,
             }
 
-        recent_history = self.short_term_memory.get_recent_messages(
-            session_id=session_id,
-            limit=10,
+        recent_history = (
+            await self.short_term_memory.load_context(
+                session_id=session_id,
+                max_turns=5,
+            )
+            if self.enable_short_term_memory
+            else []
         )
-        similar_memories = self.long_term_memory.search_similar_sessions(
-            query=question,
-            limit=3,
+        similar_memories = (
+            self.long_term_memory.search_similar_sessions(
+                query=question,
+                limit=3,
+            )
+            if self.enable_long_term_memory
+            else []
         )
 
         enhanced_context = dict(context)
         if recent_history:
-            enhanced_context["recent_history"] = [
-                {"role": msg.get("role", ""), "content": msg.get("content", "")}
-                for msg in recent_history
-            ]
+            enhanced_context["recent_history"] = recent_history
             logger.info(
                 f"Loaded {len(recent_history)} recent messages from short-term memory"
             )
@@ -472,6 +480,7 @@ class MedicalSwarmGraph:
             {
                 "question": question,
                 "context": enhanced_context,
+                "conversation_history": enhanced_context.get("recent_history", []),
                 "session_id": session_id,
                 "tool_policy": tool_policy,
                 "debug_collector": collector,
@@ -493,15 +502,15 @@ class MedicalSwarmGraph:
         return {"result": result, "final_answer": final_answer}
 
     async def save_memory(self, state: MedicalSwarmState) -> Dict[str, Any]:
-        """Persist session summary and long-term memory once per workflow."""
+        """Persist one visible turn and optional long-term artifacts."""
+        end_time = datetime.now()
         try:
-            end_time = datetime.now()
             mode = state.get("mode") or state.get("route") or "unknown"
             final_answer = (state.get("result") or {}).get("answer") or state.get("final_answer", "")
             shared_context = state.get("shared_context")
             collector = self._get_debug_collector(state)
 
-            if not self.enable_memory:
+            if not self.enable_short_term_memory and not self.enable_long_term_memory:
                 if collector:
                     collector.record_event(
                         "memory",
@@ -511,8 +520,26 @@ class MedicalSwarmGraph:
                     )
                 return {"end_time": end_time}
 
+            short_term_saved = False
+            short_term_error = None
+            if self.enable_short_term_memory and final_answer:
+                try:
+                    await self.short_term_memory.save_turn(
+                        session_id=state["session_id"],
+                        user_message=state["question"],
+                        assistant_message=final_answer,
+                    )
+                    short_term_saved = True
+                    logger.info(
+                        "Saved completed turn to short-term memory "
+                        f"(session={state['session_id']})"
+                    )
+                except Exception as exc:
+                    short_term_error = str(exc)
+                    logger.error(f"Failed to save to short-term memory: {exc}")
+
             summary_saved = False
-            if mode == "swarm" and shared_context:
+            if self.enable_long_term_memory and mode == "swarm" and shared_context:
                 try:
                     summary = SessionSummary.from_shared_context(
                         session_id=state["session_id"],
@@ -529,34 +556,43 @@ class MedicalSwarmGraph:
 
             long_term_saved = False
             long_term_error = None
-            try:
-                metadata = {
-                    "mode": mode,
-                    "total_time": (end_time - state["start_time"]).total_seconds(),
-                }
-                if mode == "swarm" and shared_context:
-                    metadata.update(
-                        {
-                            "agents_count": len(shared_context.agent_contributions),
-                            "timeout_occurred": state.get("timeout_occurred", False),
-                        }
-                    )
-                else:
-                    metadata["subtasks_count"] = len(state.get("subtasks") or [])
+            if self.enable_long_term_memory:
+                try:
+                    metadata = {
+                        "mode": mode,
+                        "total_time": (end_time - state["start_time"]).total_seconds(),
+                    }
+                    if mode == "swarm" and shared_context:
+                        metadata.update(
+                            {
+                                "agents_count": len(shared_context.agent_contributions),
+                                "timeout_occurred": state.get("timeout_occurred", False),
+                            }
+                        )
+                    else:
+                        metadata["subtasks_count"] = len(state.get("subtasks") or [])
 
-                self.long_term_memory.add_session_summary(
-                    session_id=state["session_id"],
-                    question=state["question"],
-                    answer=final_answer,
-                    metadata=metadata,
-                )
-                long_term_saved = True
-                logger.info(f"Saved to long-term memory (session={state['session_id']}, mode={mode})")
-            except Exception as exc:
-                long_term_error = str(exc)
-                logger.error(f"Failed to save to long-term memory: {exc}")
+                    memory_id = self.long_term_memory.add_session_summary(
+                        session_id=state["session_id"],
+                        question=state["question"],
+                        answer=final_answer,
+                        metadata=metadata,
+                    )
+                    long_term_saved = bool(memory_id)
+                    logger.info(
+                        f"Processed long-term memory save "
+                        f"(session={state['session_id']}, mode={mode})"
+                    )
+                except Exception as exc:
+                    long_term_error = str(exc)
+                    logger.error(f"Failed to save to long-term memory: {exc}")
 
             if collector:
+                errors = [
+                    error
+                    for error in (short_term_error, long_term_error)
+                    if error is not None
+                ]
                 collector.record_event(
                     "memory",
                     name="save_memory",
@@ -567,13 +603,17 @@ class MedicalSwarmGraph:
                     },
                     output={
                         "enabled": True,
+                        "short_term_saved": short_term_saved,
+                        "short_term_error": short_term_error,
                         "summary_saved": summary_saved,
                         "long_term_saved": long_term_saved,
                         "long_term_error": long_term_error,
                     },
-                    status="success" if long_term_error is None else "failed",
-                    error=long_term_error,
+                    status="success" if not errors else "failed",
+                    error="; ".join(errors) if errors else None,
                     metadata={
+                        "short_term_enabled": self.enable_short_term_memory,
+                        "long_term_requested": self.enable_long_term_memory,
                         "long_term_enabled": bool(getattr(self.long_term_memory, "enabled", False)),
                     },
                 )
@@ -933,7 +973,10 @@ class MedicalSwarmGraph:
                         context=context or {},
                         assessment=decomposition_result,
                         task=data,
-                    )
+                    ),
+                    "conversation_history": list(
+                        (context or {}).get("recent_history") or []
+                    ),
                 },
             )
 

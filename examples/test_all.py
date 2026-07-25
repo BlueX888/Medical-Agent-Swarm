@@ -539,30 +539,23 @@ async def test_short_term_memory():
 
     stm = ShortTermMemory(storage_type="memory")
 
-    # 创建会话
     session_id = "test-stm-001"
-    stm.create_session(session_id, metadata={"test": True})
-
-    # 添加消息
-    stm.add_message(session_id, "user", "我头痛")
-    stm.add_message(session_id, "assistant", "建议休息并就医")
-    stm.add_message(session_id, "tool", "assess_risk: risk_level=low")
+    await stm.save_turn(session_id, "我头痛", "建议休息并就医")
 
     # 获取历史
-    messages = stm.get_recent_messages(session_id, limit=10)
+    messages = await stm.load_context(session_id, max_turns=10)
 
     print(f"\n📝 存储了 {len(messages)} 条消息")
     for i, msg in enumerate(messages, 1):
         print(f"  {i}. [{msg['role']}] {msg['content'][:50]}")
 
-    assert len(messages) == 3, f"应该有3条消息，实际 {len(messages)}"
+    assert len(messages) == 2, f"应该有2条用户可见消息，实际 {len(messages)}"
     assert messages[0]["role"] == "user"
     assert messages[1]["role"] == "assistant"
-    assert messages[2]["role"] == "tool"
 
     # 清空会话
-    stm.clear_session(session_id)
-    assert stm.get_session(session_id) is None
+    await stm.clear_session(session_id)
+    assert await stm.load_context(session_id) == []
 
     print("\n✅ 短期记忆功能正常")
     print("✅ 测试 4.1 通过！")
@@ -627,10 +620,7 @@ async def test_memory_integration():
     question1 = "我最近感冒了，有点咳嗽"
     print(f"\n💬 第1轮对话: {question1}")
 
-    result1 = await coordinator.consultation_agent.process({
-        'question': question1,
-        'session_id': session_id
-    })
+    result1 = await coordinator.process(question=question1, session_id=session_id)
 
     answer1 = result1.get('response', result1.get('answer', ''))
     print(f"\n{'='*70}")
@@ -640,7 +630,7 @@ async def test_memory_integration():
     print(f"{'='*70}")
 
     # 验证短期记忆（第1轮后）
-    history_1 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_1 = await coordinator.short_term_memory.load_context(session_id, max_turns=10)
     print(f"\n  📝 短期记忆: {len(history_1)} 条消息")
     for msg in history_1:
         role_icon = "👤" if msg['role'] == 'user' else "🤖" if msg['role'] == 'assistant' else "🔧"
@@ -652,10 +642,7 @@ async def test_memory_integration():
     question2 = "那我应该吃什么药？"
     print(f"\n💬 第2轮对话: {question2}（依赖第1轮上下文）")
 
-    result2 = await coordinator.consultation_agent.process({
-        'question': question2,
-        'session_id': session_id
-    })
+    result2 = await coordinator.process(question=question2, session_id=session_id)
 
     answer2 = result2.get('response', result2.get('answer', ''))
     print(f"\n{'='*70}")
@@ -665,7 +652,7 @@ async def test_memory_integration():
     print(f"{'='*70}")
 
     # 验证短期记忆（第2轮后）
-    history_2 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_2 = await coordinator.short_term_memory.load_context(session_id, max_turns=10)
     print(f"\n  📝 短期记忆: {len(history_2)} 条消息")
 
     assert len(history_2) >= 4, f"第2轮后应该至少有4条消息，实际: {len(history_2)}"
@@ -688,10 +675,7 @@ async def test_memory_integration():
     question3 = "有副作用吗？"
     print(f"\n💬 第3轮对话: {question3}（依赖第1-2轮上下文）")
 
-    result3 = await coordinator.consultation_agent.process({
-        'question': question3,
-        'session_id': session_id
-    })
+    result3 = await coordinator.process(question=question3, session_id=session_id)
 
     answer3 = result3.get('response', result3.get('answer', ''))
     print(f"\n{'='*70}")
@@ -700,7 +684,7 @@ async def test_memory_integration():
     print(answer3)
     print(f"{'='*70}")
 
-    history_3 = coordinator.short_term_memory.get_history(session_id, limit=10)
+    history_3 = await coordinator.short_term_memory.load_context(session_id, max_turns=10)
     print(f"\n  📝 短期记忆: {len(history_3)} 条消息")
 
     assert len(history_3) >= 6, f"第3轮后应该至少有6条消息，实际: {len(history_3)}"
@@ -1045,8 +1029,8 @@ async def test_unified_memory_single_agent():
     print(f"✅ 答案长度: {len(result1.get('answer', ''))} 字符")
 
     # 验证短期记忆
-    stm = ShortTermMemory(storage_type='memory')
-    messages1 = stm.get_recent_messages(session_id, limit=100)
+    stm = coordinator.short_term_memory
+    messages1 = await stm.load_context(session_id, max_turns=50)
     user_count1 = sum(1 for msg in messages1 if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user')
     assistant_count1 = sum(1 for msg in messages1 if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'assistant')
 
@@ -1065,7 +1049,7 @@ async def test_unified_memory_single_agent():
         session_id=session_id
     )
 
-    messages2 = stm.get_recent_messages(session_id, limit=100)
+    messages2 = await stm.load_context(session_id, max_turns=50)
     print(f"\n📊 第二轮短期记忆:")
     print(f"  - 总计: {len(messages2)} 条消息")
 
@@ -1106,8 +1090,8 @@ async def test_unified_memory_swarm():
     # 验证短期记忆
     # 注意：Swarm 模式下 Worker Agents 并行执行，每个 Agent 有自己的 session
     # 这里主要验证长期记忆保存成功即可
-    stm = ShortTermMemory(storage_type='memory')
-    messages = stm.get_recent_messages(session_id, limit=100)
+    stm = coordinator.short_term_memory
+    messages = await stm.load_context(session_id, max_turns=50)
     user_count = sum(1 for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user')
 
     print(f"\n📊 短期记忆:")
@@ -1188,12 +1172,10 @@ async def test_harness_integration():
     from core.agent_loop import AgentLoop
 
     # 初始化组件
-    stm = ShortTermMemory(storage_type="memory")
-    agent_loop = AgentLoop(max_iterations=10, short_term_memory=stm)
+    agent_loop = AgentLoop(max_iterations=10)
     agent = ConsultationAgent()
 
     session_id = "harness_integration_test"
-    stm.create_session(session_id)
 
     # 测试场景：高危症状
     test_case = {
@@ -1250,7 +1232,7 @@ async def test_memory_no_duplication():
     session_id = f"test-no-dup-{datetime.now().strftime('%Y%m%d%H%M%S')}"
 
     # 清空短期记忆
-    stm = ShortTermMemory(storage_type='memory')
+    stm = coordinator.short_term_memory
 
     print("\n📝 执行单次对话...")
     result = await coordinator.process(
@@ -1259,7 +1241,7 @@ async def test_memory_no_duplication():
     )
 
     # 检查消息数量
-    messages = stm.get_recent_messages(session_id, limit=100)
+    messages = await stm.load_context(session_id, max_turns=50)
     user_msgs = [msg for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'user']
     assistant_msgs = [msg for msg in messages if (msg.role if hasattr(msg, 'role') else msg.get('role')) == 'assistant']
 

@@ -82,9 +82,16 @@ export type MemoryMessage = Record<string, unknown> & {
 // Memory API 返回值：短期历史、长期相似案例和长期记忆开关状态。
 export type MemoryResponse = {
   session_id: string;
+  backend: "memory" | "redis";
+  ttl_seconds: number;
   recent_history: MemoryMessage[];
   historical_cases: Array<Record<string, unknown>>;
   long_term_enabled: boolean;
+};
+
+export type MemoryClearResponse = {
+  session_id: string;
+  cleared: boolean;
 };
 
 // 创建 run 的请求体，字段名保持与 FastAPI schema 一致。
@@ -94,6 +101,8 @@ export type RunCreatePayload = {
   session_id?: string;
   enable_swarm: boolean;
   enable_memory: boolean;
+  enable_short_term_memory?: boolean;
+  enable_long_term_memory?: boolean;
 };
 
 // POST /api/runs 的响应：run_id 用于后续轮询，run 是初始快照。

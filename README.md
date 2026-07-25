@@ -12,7 +12,7 @@ Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的�
 - 医疗 Skill：通过可发现的 Skill 扩展医疗问答流程
 - 风险识别：识别潜在高风险症状并给出就医紧迫性提示
 - 证据研究：支持网络搜索与多来源信息综合
-- 会话上下文：默认在内存中维护同一会话的对话历史
+- 会话上下文：支持内存或 Redis 保存同一会话最近 20 轮对话
 - 输出安全检查：检查危险建议、过度诊断和用药风险
 - 多种使用方式：支持命令行、Python 调用和本地调试界面
 
@@ -132,7 +132,46 @@ async def main():
 asyncio.run(main())
 ```
 
-可以通过相同的 `session_id` 保留当前进程内的会话上下文。默认短期记忆保存在内存中，程序退出后不会保留。
+可以通过相同的 `session_id` 保留会话上下文。默认使用进程内存；启用 Redis 后，应用重启或启动多个进程仍能共享最近的对话。
+
+## Redis 短期记忆
+
+短期记忆只保存用户问题和最终回答，不保存 Agent 中间过程或工具结果。默认保留最近 20 轮，并在 24 小时无活动后过期。
+
+先启动 Redis：
+
+```bash
+docker compose up -d redis
+```
+
+然后设置环境变量。也可以把这些值写入项目根目录的 `.env`：
+
+```env
+SHORT_TERM_MEMORY_BACKEND=redis
+REDIS_URL=redis://localhost:6379/0
+SHORT_TERM_MEMORY_TTL=86400
+SHORT_TERM_MEMORY_MAX_MESSAGES=40
+```
+
+Redis 不可用时，程序会记录警告并回退到进程内存。查看实际使用的后端：
+
+```text
+GET /api/health
+```
+
+会话记忆接口：
+
+```text
+GET    /api/sessions/{session_id}/memory
+DELETE /api/sessions/{session_id}/memory
+```
+
+运行 Redis 集成测试：
+
+```powershell
+$env:REDIS_TEST_URL="redis://localhost:6379/0"
+python -m pytest -m integration tests/test_short_term_memory_redis.py
+```
 
 ## 本地调试界面
 
@@ -192,6 +231,7 @@ Medical-Agent-Swarm/
 |-- swarm/             # LangGraph 编排与公共调用入口
 |-- validation/        # 输出修复工具
 |-- config.py.example  # 配置模板
+|-- compose.yaml       # 本地 Redis
 |-- main.py            # 命令行入口
 `-- requirements.txt   # Python 依赖
 ```
@@ -204,6 +244,7 @@ Medical-Agent-Swarm/
 - 用户输入可能会发送到所配置的模型服务
 - 深度研究功能可能会向外部搜索服务发送查询内容
 - 启用 Mem0 后，会话摘要可能被发送到对应的云服务
+- 启用 Redis 后，用户问题和最终回答会暂存在配置的 Redis 实例
 - 部署为公开服务前，应自行增加身份验证、访问控制、限流、审计和数据脱敏
 - 不建议直接将当前调试 API 暴露到公网
 

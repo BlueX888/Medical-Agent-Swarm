@@ -174,6 +174,8 @@ class BaseAgent(ABC):
         metadata = getattr(subtask, "metadata", {}) or {}
         if metadata.get("tool_policy"):
             input_data["tool_policy"] = metadata["tool_policy"]
+        if metadata.get("conversation_history"):
+            input_data["conversation_history"] = metadata["conversation_history"]
         if debug_collector:
             input_data["debug_collector"] = debug_collector
 

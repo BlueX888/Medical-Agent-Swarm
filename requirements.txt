@@ -26,6 +26,7 @@ tqdm>=4.65.0
 # 异步支持
 aiohttp>=3.8.0
 httpx>=0.24.0
+redis>=5.0,<7.0
 
 # Debug API
 fastapi>=0.115.0

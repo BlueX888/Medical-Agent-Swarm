@@ -1,4 +1,6 @@
-# LLM API config (OpenAI-compatible endpoint)
+# LLM API fallback config (OpenAI-compatible endpoint).
+# Prefer configuring OPENAI_* variables in .env; environment variables override
+# these values at runtime. Keep this file only for backward compatibility.
 LLM_CONFIG = {
     "api_key": "your-api-key",
     "model_name": "your-model",

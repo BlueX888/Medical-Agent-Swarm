@@ -72,33 +72,32 @@ pip install -r requirements.txt
 
 ### 4. 配置模型
 
-复制配置模板：
+推荐复制环境变量模板：
 
 Windows PowerShell：
 
 ```powershell
-Copy-Item config.py.example config.py
+Copy-Item .env.example .env
 ```
 
 Linux 或 macOS：
 
 ```bash
-cp config.py.example config.py
+cp .env.example .env
 ```
 
-编辑 `config.py`：
+编辑 `.env`：
 
-```python
-LLM_CONFIG = {
-    "api_key": "your-api-key",
-    "model_name": "your-model",
-    "base_url": "https://api.openai.com/v1",
-    "temperature": 0.7,
-    "max_tokens": 8192,
-}
+```env
+OPENAI_API_KEY=your-api-key
+OPENAI_MODEL=your-model
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_TEMPERATURE=0.7
+OPENAI_MAX_TOKENS=8192
 ```
 
-`config.py` 包含私密配置，已被 `.gitignore` 排除。请勿将真实 API Key 提交到 GitHub。
+环境变量优先于 `config.py`；已有的 `config.py` 配置仍可继续使用。`.env`
+和 `config.py` 均已被 `.gitignore` 排除，请勿将真实 API Key 提交到 GitHub。
 
 ### 5. 启动命令行程序
 
@@ -230,7 +229,8 @@ Medical-Agent-Swarm/
 |-- research/          # 网络搜索和证据综合
 |-- swarm/             # LangGraph 编排与公共调用入口
 |-- validation/        # 输出修复工具
-|-- config.py.example  # 配置模板
+|-- .env.example       # 环境变量配置模板
+|-- config.py.example  # 兼容旧版的 Python 配置模板
 |-- compose.yaml       # 本地 Redis
 |-- main.py            # 命令行入口
 `-- requirements.txt   # Python 依赖

@@ -5,16 +5,74 @@ LLM客户端
 """
 import asyncio
 import json
+import os
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from openai import AsyncOpenAI
+from dotenv import dotenv_values
 from loguru import logger
+
+PROJECT_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 try:
     from config import LLM_CONFIG
 except ImportError:
     LLM_CONFIG = {}
 from core.observability import trace_async
+
+
+def resolve_llm_config() -> Dict[str, Any]:
+    """Resolve OpenAI-compatible settings, preferring environment variables."""
+    config = dict(LLM_CONFIG)
+    dotenv_config = dotenv_values(PROJECT_ENV_FILE)
+
+    def get_setting(name: str) -> Optional[str]:
+        return os.getenv(name) or dotenv_config.get(name)
+
+    environment_overrides = {
+        "api_key": get_setting("OPENAI_API_KEY"),
+        "model_name": get_setting("OPENAI_MODEL"),
+        "base_url": get_setting("OPENAI_BASE_URL"),
+    }
+    config.update({
+        key: value
+        for key, value in environment_overrides.items()
+        if value
+    })
+
+    if temperature := get_setting("OPENAI_TEMPERATURE"):
+        try:
+            config["temperature"] = float(temperature)
+        except ValueError as exc:
+            raise ValueError("OPENAI_TEMPERATURE must be a number.") from exc
+
+    if max_tokens := get_setting("OPENAI_MAX_TOKENS"):
+        try:
+            config["max_tokens"] = int(max_tokens)
+        except ValueError as exc:
+            raise ValueError("OPENAI_MAX_TOKENS must be an integer.") from exc
+
+    missing = [
+        key
+        for key in ("api_key", "model_name")
+        if not config.get(key)
+    ]
+    if missing:
+        variable_names = {
+            "api_key": "OPENAI_API_KEY",
+            "model_name": "OPENAI_MODEL",
+        }
+        expected = ", ".join(variable_names[key] for key in missing)
+        raise ValueError(
+            f"Missing LLM configuration: set {expected} in .env "
+            "or provide the corresponding values in config.py."
+        )
+
+    config.setdefault("base_url", "https://api.openai.com/v1")
+    config.setdefault("temperature", 0.7)
+    config.setdefault("max_tokens", 8192)
+    return config
 
 
 @dataclass
@@ -53,8 +111,8 @@ class LLMClient:
         self.model_type = model_type
 
         if model_type == "openai_compatible":
-            # 使用 OpenAI 兼容的 API（通过 config.py 配置）
-            self.config = LLM_CONFIG
+            # 环境变量优先，config.py 作为向后兼容的回退配置。
+            self.config = resolve_llm_config()
             self.client = AsyncOpenAI(
                 api_key=self.config["api_key"],
                 base_url=self.config["base_url"]

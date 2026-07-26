@@ -70,6 +70,8 @@ frontend/dist/
 frontend/src/**/*.js
 frontend/src/**/*.d.ts
 !frontend/src/vite-env.d.ts
+frontend-user/dist/
+frontend-user/node_modules/
 
 # 内部评测、性能结果与开发报告
 evaluation/

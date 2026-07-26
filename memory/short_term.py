@@ -38,17 +38,27 @@ class MemoryMessage:
     role: str
     content: str
     timestamp: str
+    metadata: Optional[Dict[str, Any]] = None
 
     @classmethod
-    def create(cls, role: str, content: str) -> "MemoryMessage":
+    def create(
+        cls,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "MemoryMessage":
         return cls(
             role=role,
             content=content,
             timestamp=datetime.now(timezone.utc).isoformat(),
+            metadata=metadata,
         )
 
-    def to_dict(self) -> Dict[str, str]:
-        return asdict(self)
+    def to_dict(self) -> Dict[str, Any]:
+        message = asdict(self)
+        if self.metadata is None:
+            message.pop("metadata")
+        return message
 
 
 class ShortTermMemoryAdapter(Protocol):
@@ -60,13 +70,13 @@ class ShortTermMemoryAdapter(Protocol):
         self,
         session_id: str,
         message_limit: int,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         ...
 
     async def save_messages(
         self,
         session_id: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
     ) -> None:
         ...
 
@@ -85,7 +95,7 @@ class ShortTermMemoryAdapter(Protocol):
 
 @dataclass
 class _InMemorySession:
-    messages: List[Dict[str, str]]
+    messages: List[Dict[str, Any]]
     expires_at: float
 
 
@@ -103,7 +113,7 @@ class InMemoryShortTermMemoryAdapter:
         self,
         session_id: str,
         message_limit: int,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         self._purge_expired_session(session_id)
         session = self._sessions.get(session_id)
         if session is None:
@@ -113,7 +123,7 @@ class InMemoryShortTermMemoryAdapter:
     async def save_messages(
         self,
         session_id: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
     ) -> None:
         self._purge_expired_session(session_id)
         existing = self._sessions.get(session_id)
@@ -171,7 +181,7 @@ class RedisShortTermMemoryAdapter:
         self,
         session_id: str,
         message_limit: int,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         try:
             values = await self._redis.lrange(
                 self._key(session_id),
@@ -182,13 +192,14 @@ class RedisShortTermMemoryAdapter:
             for value in values:
                 data = json.loads(value)
                 if data.get("role") in {"user", "assistant"}:
-                    messages.append(
-                        {
-                            "role": str(data["role"]),
-                            "content": str(data.get("content", "")),
-                            "timestamp": str(data.get("timestamp", "")),
-                        }
-                    )
+                    message: Dict[str, Any] = {
+                        "role": str(data["role"]),
+                        "content": str(data.get("content", "")),
+                        "timestamp": str(data.get("timestamp", "")),
+                    }
+                    if isinstance(data.get("metadata"), dict):
+                        message["metadata"] = data["metadata"]
+                    messages.append(message)
             return messages
         except Exception as exc:
             logger.warning(f"Failed to load Redis short-term memory: {exc}")
@@ -197,7 +208,7 @@ class RedisShortTermMemoryAdapter:
     async def save_messages(
         self,
         session_id: str,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, Any]],
     ) -> None:
         key = self._key(session_id)
         serialized = [
@@ -317,7 +328,7 @@ class ShortTermMemory:
         self,
         session_id: str,
         max_turns: int = 5,
-    ) -> List[Dict[str, str]]:
+    ) -> List[Dict[str, Any]]:
         """Load recent complete turns in chronological OpenAI message order."""
         self._validate_session_id(session_id)
         if max_turns <= 0:
@@ -329,6 +340,7 @@ class ShortTermMemory:
         session_id: str,
         user_message: str,
         assistant_message: str,
+        assistant_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Atomically append one completed user/assistant turn."""
         self._validate_session_id(session_id)
@@ -339,7 +351,11 @@ class ShortTermMemory:
 
         messages = [
             MemoryMessage.create("user", user_message).to_dict(),
-            MemoryMessage.create("assistant", assistant_message).to_dict(),
+            MemoryMessage.create(
+                "assistant",
+                assistant_message,
+                metadata=assistant_metadata,
+            ).to_dict(),
         ]
         await self._adapter.save_messages(session_id, messages)
 

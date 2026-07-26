@@ -85,6 +85,29 @@ async def test_health_reports_the_active_backend():
 
 
 @pytest.mark.asyncio
+async def test_assistant_display_metadata_round_trips_with_the_visible_turn():
+    memory = ShortTermMemory(storage_type="memory")
+    metadata = {
+        "risk_level": "high",
+        "suggestions": ["Seek in-person care today"],
+        "disclaimer": "For reference only.",
+        "agents_involved": ["diagnostic"],
+    }
+
+    await memory.save_turn(
+        session_id="session-with-metadata",
+        user_message="I have a severe headache.",
+        assistant_message="Please arrange an in-person assessment.",
+        assistant_metadata=metadata,
+    )
+
+    messages = await memory.load_context("session-with-metadata")
+
+    assert "metadata" not in messages[0]
+    assert messages[1]["metadata"] == metadata
+
+
+@pytest.mark.asyncio
 async def test_configured_redis_falls_back_to_memory_when_unavailable(monkeypatch):
     monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
     monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")

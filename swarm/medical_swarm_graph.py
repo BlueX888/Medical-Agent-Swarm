@@ -524,10 +524,18 @@ class MedicalSwarmGraph:
             short_term_error = None
             if self.enable_short_term_memory and final_answer:
                 try:
+                    result = dict(state.get("result") or {})
+                    assistant_metadata = {
+                        "risk_level": self._extract_risk_level_from_state(state),
+                        "suggestions": result.get("suggestions", []),
+                        "disclaimer": result.get("disclaimer", ""),
+                        "agents_involved": result.get("agents_involved", []),
+                    }
                     await self.short_term_memory.save_turn(
                         session_id=state["session_id"],
                         user_message=state["question"],
                         assistant_message=final_answer,
+                        assistant_metadata=assistant_metadata,
                     )
                     short_term_saved = True
                     logger.info(

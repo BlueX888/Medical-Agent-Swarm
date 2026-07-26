@@ -26,7 +26,14 @@ class RecordingShortTermMemory:
             },
         ]
 
-    async def save_turn(self, session_id, user_message, assistant_message):
+    async def save_turn(
+        self,
+        session_id,
+        user_message,
+        assistant_message,
+        assistant_metadata=None,
+    ):
+        assert isinstance(assistant_metadata, dict)
         self.saved_turns.append((session_id, user_message, assistant_message))
 
 

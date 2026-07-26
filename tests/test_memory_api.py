@@ -4,7 +4,29 @@ import time
 from fastapi.testclient import TestClient
 
 import api.server as server
-from memory import ShortTermMemory
+from memory import ShortTermMemory, ShortTermMemoryUnavailable
+
+
+class UnavailableShortTermMemoryAdapter:
+    backend_name = "redis"
+
+    async def load_messages(self, session_id, message_limit):
+        raise ShortTermMemoryUnavailable("Redis is unavailable")
+
+    async def save_messages(self, session_id, messages):
+        raise ShortTermMemoryUnavailable("Redis is unavailable")
+
+    async def clear_session(self, session_id):
+        raise ShortTermMemoryUnavailable("Redis is unavailable")
+
+    async def get_session_ttl(self, session_id):
+        raise ShortTermMemoryUnavailable("Redis is unavailable")
+
+    async def health(self):
+        return {"backend": "redis", "status": "degraded"}
+
+    async def close(self):
+        return None
 
 
 def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch):
@@ -77,3 +99,18 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch)
         assert client.get("/api/sessions/session-api/memory").json()[
             "recent_history"
         ] == []
+
+
+def test_memory_api_returns_service_unavailable_when_redis_cannot_be_read():
+    memory = ShortTermMemory(adapter=UnavailableShortTermMemoryAdapter())
+
+    with TestClient(server.app) as client:
+        server.app.state.short_term_memory = memory
+
+        loaded = client.get("/api/sessions/session-api/memory")
+        deleted = client.delete("/api/sessions/session-api/memory")
+
+    assert loaded.status_code == 503
+    assert loaded.json()["detail"] == "Short-term memory backend unavailable"
+    assert deleted.status_code == 503
+    assert deleted.json()["detail"] == "Short-term memory backend unavailable"

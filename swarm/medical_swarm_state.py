@@ -17,6 +17,7 @@ class MedicalSwarmState(TypedDict, total=False):
 
     recent_history: List[Dict[str, Any]]
     historical_cases: List[Dict[str, Any]]
+    short_term_memory_error: Optional[str]
 
     assessment: Dict[str, Any]
     subtasks: List[Dict[str, Any]]

@@ -3,7 +3,7 @@ from unittest.mock import ANY
 
 import pytest
 
-from memory import ShortTermMemory, create_short_term_memory
+from memory import ShortTermMemory, ShortTermMemoryUnavailable, create_short_term_memory
 
 
 @pytest.mark.asyncio
@@ -108,13 +108,51 @@ async def test_assistant_display_metadata_round_trips_with_the_visible_turn():
 
 
 @pytest.mark.asyncio
+async def test_loaded_metadata_is_isolated_from_in_memory_storage():
+    memory = ShortTermMemory(storage_type="memory")
+    await memory.save_turn(
+        session_id="session-with-isolated-metadata",
+        user_message="问题",
+        assistant_message="回答",
+        assistant_metadata={"suggestions": ["最初建议"]},
+    )
+
+    loaded = await memory.load_context("session-with-isolated-metadata")
+    loaded[1]["metadata"]["suggestions"].append("调用方修改")
+
+    loaded_again = await memory.load_context("session-with-isolated-metadata")
+    assert loaded_again[1]["metadata"]["suggestions"] == ["最初建议"]
+
+
+@pytest.mark.asyncio
 async def test_configured_redis_falls_back_to_memory_when_unavailable(monkeypatch):
     monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
     monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")
+    monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "true")
 
     memory = await create_short_term_memory()
 
     assert await memory.health() == {
         "backend": "memory",
-        "status": "ok",
+        "status": "degraded",
+        "configured_backend": "redis",
     }
+
+
+@pytest.mark.asyncio
+async def test_configured_redis_can_fail_fast_when_fallback_is_disabled(monkeypatch):
+    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")
+    monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "false")
+
+    with pytest.raises(ShortTermMemoryUnavailable, match="required but unavailable"):
+        await create_short_term_memory()
+
+
+@pytest.mark.asyncio
+async def test_unknown_backend_configuration_fails_instead_of_falling_back(monkeypatch):
+    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redsi")
+    monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "true")
+
+    with pytest.raises(ValueError, match="Unsupported SHORT_TERM_MEMORY_BACKEND"):
+        await create_short_term_memory()

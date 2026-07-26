@@ -1,9 +1,12 @@
+import asyncio
 from datetime import datetime
 
 import pytest
 
-from memory import ShortTermMemory
+from memory import ShortTermMemory, ShortTermMemoryUnavailable
+import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
+from swarm.swarm_coordinator import SwarmCoordinator
 
 
 class RecordingShortTermMemory:
@@ -47,6 +50,11 @@ class DisabledLongTermMemory:
         raise AssertionError("long-term memory is disabled")
 
 
+class UnavailableShortTermMemory:
+    async def load_context(self, session_id, max_turns=5):
+        raise ShortTermMemoryUnavailable("Redis is unavailable")
+
+
 class FakeWorker:
     def __init__(self, agent_id):
         self.agent_id = agent_id
@@ -82,6 +90,36 @@ class SwarmAcceptanceGraph(MedicalSwarmGraph):
         return "这是两个 Agent 汇总后的最终回答。"
 
 
+class ConcurrentRunProbe:
+    def __init__(self):
+        self.active = 0
+        self.max_active = 0
+        self.first_started = asyncio.Event()
+        self.completed = []
+
+    async def ainvoke(self, state):
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        if state["question"] == "first":
+            self.first_started.set()
+            await asyncio.sleep(0.05)
+        self.completed.append(state["question"])
+        self.active -= 1
+        return {"result": {"answer": state["question"]}}
+
+
+def make_coordinator_for_concurrency(memory, graph):
+    coordinator = SwarmCoordinator.__new__(SwarmCoordinator)
+    coordinator.enable_swarm = False
+    coordinator.enable_short_term_memory = True
+    coordinator.enable_long_term_memory = False
+    coordinator.swarm_timeout_s = 120.0
+    coordinator.short_term_memory = memory
+    coordinator.medical_graph = graph
+    coordinator.worker_pool = []
+    return coordinator
+
+
 def make_graph_for_memory_nodes():
     graph = MedicalSwarmGraph.__new__(MedicalSwarmGraph)
     graph.short_term_memory = RecordingShortTermMemory()
@@ -110,6 +148,99 @@ async def test_graph_loads_short_term_history_independently_from_long_term_memor
     ]
     assert result["enhanced_context"]["recent_history"] == result["recent_history"]
     assert result["historical_cases"] == []
+
+
+@pytest.mark.asyncio
+async def test_graph_continues_without_history_when_short_term_memory_is_unavailable():
+    graph = make_graph_for_memory_nodes()
+    graph.short_term_memory = UnavailableShortTermMemory()
+
+    result = await graph.load_memory(
+        {
+            "question": "当前问题",
+            "session_id": "session-a",
+            "context": {"age": 30},
+        }
+    )
+
+    assert result["recent_history"] == []
+    assert result["enhanced_context"] == {"age": 30}
+    assert result["short_term_memory_error"] == "Redis is unavailable"
+
+
+@pytest.mark.asyncio
+async def test_coordinators_serialize_concurrent_runs_for_the_same_session():
+    graph = ConcurrentRunProbe()
+    first_coordinator = make_coordinator_for_concurrency(
+        ShortTermMemory(storage_type="memory"),
+        graph,
+    )
+    second_coordinator = make_coordinator_for_concurrency(
+        ShortTermMemory(storage_type="memory"),
+        graph,
+    )
+
+    first = asyncio.create_task(
+        first_coordinator.process("first", session_id="shared-session")
+    )
+    await graph.first_started.wait()
+    second = asyncio.create_task(
+        second_coordinator.process("second", session_id="shared-session")
+    )
+    await asyncio.gather(first, second)
+
+    assert graph.max_active == 1
+    assert graph.completed == ["first", "second"]
+
+
+def test_process_with_swarm_initializes_default_memory_once_per_event_loop(
+    monkeypatch,
+):
+    create_calls = 0
+
+    async def create_memory():
+        nonlocal create_calls
+        create_calls += 1
+        await asyncio.sleep(0.05)
+        return ShortTermMemory(storage_type="memory")
+
+    class CoordinatorProbe:
+        def __init__(
+            self,
+            *,
+            enable_swarm,
+            enable_memory,
+            enable_short_term_memory,
+            enable_long_term_memory,
+            short_term_memory,
+        ):
+            self.enable_swarm = enable_swarm
+            self.enable_short_term_memory = enable_short_term_memory
+            self.enable_long_term_memory = enable_long_term_memory
+            self.short_term_memory = short_term_memory
+
+        async def process(self, question, context, **kwargs):
+            return {"answer": question}
+
+    monkeypatch.setattr(coordinator_module, "create_short_term_memory", create_memory)
+    monkeypatch.setattr(coordinator_module, "SwarmCoordinator", CoordinatorProbe)
+
+    async def run_concurrently():
+        await asyncio.gather(
+            coordinator_module.process_with_swarm(
+                "first",
+                session_id="shared-session",
+            ),
+            coordinator_module.process_with_swarm(
+                "second",
+                session_id="shared-session",
+            ),
+        )
+
+    asyncio.run(run_concurrently())
+    asyncio.run(run_concurrently())
+
+    assert create_calls == 2
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 # 环境变量和配置
 .env
+.env.backup-*
 config.py
 
 # Python

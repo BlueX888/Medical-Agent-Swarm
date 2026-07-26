@@ -150,13 +150,26 @@ SHORT_TERM_MEMORY_BACKEND=redis
 REDIS_URL=redis://localhost:6379/0
 SHORT_TERM_MEMORY_TTL=86400
 SHORT_TERM_MEMORY_MAX_MESSAGES=40
+SHORT_TERM_MEMORY_ALLOW_FALLBACK=true
 ```
 
-Redis 不可用时，程序会记录警告并回退到进程内存。查看实际使用的后端：
+启动时 Redis 不可用，默认会记录警告并回退到进程内存，健康状态为
+`degraded`。生产或多进程部署建议设置
+`SHORT_TERM_MEMORY_ALLOW_FALLBACK=false`，让 Redis 不可用时启动失败，避免各
+worker 落入互不共享的内存孤岛。查看实际使用的后端：
 
 ```text
 GET /api/health
 ```
+
+运行期间 Redis 读取失败时，对话流程会在不注入历史的情况下继续，并记录降级
+错误；记忆查询和删除接口返回 HTTP 503，不会把后端故障伪装成“会话不存在”。
+
+同一服务进程的事件循环内、相同 `session_id` 的请求会串行执行。多 worker
+或多进程部署仍应在网关或客户端保证同一会话同时只有一个进行中的请求。
+
+仓库内的 Compose 配置只监听本机且不启用 Redis 磁盘持久化，适合本地开发。
+生产环境应使用私有网络、认证和 TLS，并根据隐私要求独立决定持久化与备份策略。
 
 会话记忆接口：
 

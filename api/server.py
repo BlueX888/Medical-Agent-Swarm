@@ -12,7 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from core.skill_loader import discover_skills, is_active_skill
 from debug import DebugTraceCollector, InMemoryTraceStore
-from memory import LongTermMemory, ShortTermMemory, create_short_term_memory
+from memory import (
+    LongTermMemory,
+    ShortTermMemory,
+    ShortTermMemoryError,
+    create_short_term_memory,
+)
 from swarm import SwarmCoordinator
 
 from .schemas import (
@@ -164,10 +169,17 @@ async def get_session_memory(
     limit: int = Query(default=10, ge=1, le=50),
 ) -> MemoryResponse:
     short_term_memory = _short_term_memory(request)
-    recent_history = await short_term_memory.load_context(
-        session_id=session_id,
-        max_turns=max(1, (limit + 1) // 2),
-    )
+    try:
+        recent_history = await short_term_memory.load_context(
+            session_id=session_id,
+            max_turns=max(1, (limit + 1) // 2),
+        )
+        ttl_seconds = await short_term_memory.get_session_ttl(session_id)
+    except ShortTermMemoryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Short-term memory backend unavailable",
+        ) from exc
     recent_history = recent_history[-limit:]
     historical_cases = (
         LONG_TERM_MEMORY.search_similar_sessions(query=query, limit=min(limit, 10))
@@ -177,7 +189,7 @@ async def get_session_memory(
     return MemoryResponse(
         session_id=session_id,
         backend=short_term_memory.backend_name,
-        ttl_seconds=await short_term_memory.get_session_ttl(session_id),
+        ttl_seconds=ttl_seconds,
         recent_history=recent_history,
         historical_cases=historical_cases,
         long_term_enabled=bool(getattr(LONG_TERM_MEMORY, "enabled", False)),
@@ -192,7 +204,13 @@ async def clear_session_memory(
     request: Request,
     session_id: str,
 ) -> MemoryClearResponse:
-    cleared = await _short_term_memory(request).clear_session(session_id)
+    try:
+        cleared = await _short_term_memory(request).clear_session(session_id)
+    except ShortTermMemoryError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Short-term memory backend unavailable",
+        ) from exc
     return MemoryClearResponse(session_id=session_id, cleared=cleared)
 
 

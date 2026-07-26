@@ -18,7 +18,13 @@ from loguru import logger
 from core import LLMClient
 from core.observability import trace_async
 from debug import DebugTraceCollector
-from memory import LongTermMemory, SessionSummary, SessionSummaryManager, ShortTermMemory
+from memory import (
+    LongTermMemory,
+    SessionSummary,
+    SessionSummaryManager,
+    ShortTermMemory,
+    ShortTermMemoryError,
+)
 from memory.evidence_cache import EvidenceMemory
 
 from .medical_swarm_state import MedicalSwarmState
@@ -170,14 +176,22 @@ class MedicalSwarmGraph:
                 "enhanced_context": context,
             }
 
-        recent_history = (
-            await self.short_term_memory.load_context(
-                session_id=session_id,
-                max_turns=5,
-            )
-            if self.enable_short_term_memory
-            else []
-        )
+        short_term_memory_error = None
+        if self.enable_short_term_memory:
+            try:
+                recent_history = await self.short_term_memory.load_context(
+                    session_id=session_id,
+                    max_turns=5,
+                )
+            except ShortTermMemoryError as exc:
+                short_term_memory_error = str(exc)
+                recent_history = []
+                logger.error(
+                    "Short-term memory unavailable while loading context "
+                    f"(session={session_id}): {exc}"
+                )
+        else:
+            recent_history = []
         similar_memories = (
             self.long_term_memory.search_similar_sessions(
                 query=question,
@@ -223,6 +237,7 @@ class MedicalSwarmGraph:
                     "recent_history": recent_history,
                     "historical_cases": similar_memories,
                     "enhanced_context": enhanced_context,
+                    "short_term_memory_error": short_term_memory_error,
                 },
                 metadata={
                     "long_term_enabled": bool(getattr(self.long_term_memory, "enabled", False)),
@@ -233,6 +248,7 @@ class MedicalSwarmGraph:
             "recent_history": recent_history,
             "historical_cases": similar_memories,
             "enhanced_context": enhanced_context,
+            "short_term_memory_error": short_term_memory_error,
         }
 
     async def plan_and_decompose(self, state: MedicalSwarmState) -> Dict[str, Any]:

@@ -6,13 +6,17 @@ results, and debug traces stay in their request-local stores.
 
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import math
 import os
+import threading
 import time
-from dataclasses import asdict, dataclass
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, AsyncIterator, Dict, List, Optional, Protocol
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -29,6 +33,18 @@ REDIS_CONNECTION_OPTIONS = {
     "socket_connect_timeout": 1.0,
     "socket_timeout": 1.0,
 }
+
+
+class ShortTermMemoryError(RuntimeError):
+    """Base error for short-term memory storage failures."""
+
+
+class ShortTermMemoryUnavailable(ShortTermMemoryError):
+    """Raised when the configured short-term memory backend is unavailable."""
+
+
+class ShortTermMemoryDataError(ShortTermMemoryError):
+    """Raised when stored memory cannot be serialized or decoded safely."""
 
 
 @dataclass(frozen=True)
@@ -99,6 +115,19 @@ class _InMemorySession:
     expires_at: float
 
 
+@dataclass
+class _SessionRunLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+_SESSION_RUN_LOCKS: Dict[
+    tuple[asyncio.AbstractEventLoop, str],
+    _SessionRunLock,
+] = {}
+_SESSION_RUN_LOCKS_GUARD = threading.Lock()
+
+
 class InMemoryShortTermMemoryAdapter:
     """Process-local adapter used for development, fallback, and tests."""
 
@@ -118,7 +147,7 @@ class InMemoryShortTermMemoryAdapter:
         session = self._sessions.get(session_id)
         if session is None:
             return []
-        return [dict(message) for message in session.messages[-message_limit:]]
+        return copy.deepcopy(session.messages[-message_limit:])
 
     async def save_messages(
         self,
@@ -128,7 +157,7 @@ class InMemoryShortTermMemoryAdapter:
         self._purge_expired_session(session_id)
         existing = self._sessions.get(session_id)
         history = list(existing.messages) if existing else []
-        history.extend(messages)
+        history.extend(copy.deepcopy(messages))
         self._sessions[session_id] = _InMemorySession(
             messages=history[-self.max_messages :],
             expires_at=time.monotonic() + self.ttl_seconds,
@@ -188,22 +217,35 @@ class RedisShortTermMemoryAdapter:
                 -message_limit,
                 -1,
             )
-            messages = []
-            for value in values:
-                data = json.loads(value)
-                if data.get("role") in {"user", "assistant"}:
-                    message: Dict[str, Any] = {
-                        "role": str(data["role"]),
-                        "content": str(data.get("content", "")),
-                        "timestamp": str(data.get("timestamp", "")),
-                    }
-                    if isinstance(data.get("metadata"), dict):
-                        message["metadata"] = data["metadata"]
-                    messages.append(message)
-            return messages
         except Exception as exc:
             logger.warning(f"Failed to load Redis short-term memory: {exc}")
-            return []
+            raise ShortTermMemoryUnavailable(
+                "Redis short-term memory is unavailable"
+            ) from exc
+
+        messages = []
+        for value in values:
+            try:
+                data = json.loads(value)
+            except (TypeError, json.JSONDecodeError) as exc:
+                logger.error("Redis short-term memory contains invalid JSON")
+                raise ShortTermMemoryDataError(
+                    "Redis short-term memory contains invalid data"
+                ) from exc
+            if not isinstance(data, dict):
+                raise ShortTermMemoryDataError(
+                    "Redis short-term memory contains invalid data"
+                )
+            if data.get("role") in {"user", "assistant"}:
+                message: Dict[str, Any] = {
+                    "role": str(data["role"]),
+                    "content": str(data.get("content", "")),
+                    "timestamp": str(data.get("timestamp", "")),
+                }
+                if isinstance(data.get("metadata"), dict):
+                    message["metadata"] = data["metadata"]
+                messages.append(message)
+        return messages
 
     async def save_messages(
         self,
@@ -211,10 +253,15 @@ class RedisShortTermMemoryAdapter:
         messages: List[Dict[str, Any]],
     ) -> None:
         key = self._key(session_id)
-        serialized = [
-            json.dumps(message, ensure_ascii=False, separators=(",", ":"))
-            for message in messages
-        ]
+        try:
+            serialized = [
+                json.dumps(message, ensure_ascii=False, separators=(",", ":"))
+                for message in messages
+            ]
+        except (TypeError, ValueError) as exc:
+            raise ShortTermMemoryDataError(
+                "Short-term memory message is not JSON serializable"
+            ) from exc
         try:
             async with self._redis.pipeline(transaction=True) as pipeline:
                 pipeline.rpush(key, *serialized)
@@ -223,21 +270,27 @@ class RedisShortTermMemoryAdapter:
                 await pipeline.execute()
         except Exception as exc:
             logger.warning(f"Failed to save Redis short-term memory: {exc}")
-            raise
+            raise ShortTermMemoryUnavailable(
+                "Redis short-term memory is unavailable"
+            ) from exc
 
     async def clear_session(self, session_id: str) -> bool:
         try:
             return bool(await self._redis.delete(self._key(session_id)))
         except Exception as exc:
             logger.warning(f"Failed to clear Redis short-term memory: {exc}")
-            return False
+            raise ShortTermMemoryUnavailable(
+                "Redis short-term memory is unavailable"
+            ) from exc
 
     async def get_session_ttl(self, session_id: str) -> int:
         try:
             return int(await self._redis.ttl(self._key(session_id)))
         except Exception as exc:
             logger.warning(f"Failed to read Redis short-term memory TTL: {exc}")
-            return -2
+            raise ShortTermMemoryUnavailable(
+                "Redis short-term memory is unavailable"
+            ) from exc
 
     async def health(self) -> Dict[str, str]:
         try:
@@ -298,6 +351,7 @@ class ShortTermMemory:
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         adapter: Optional[ShortTermMemoryAdapter] = None,
+        fallback_from: Optional[str] = None,
     ):
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be greater than zero")
@@ -313,6 +367,7 @@ class ShortTermMemory:
             redis_url=redis_url,
         )
         self.storage_type = self._adapter.backend_name
+        self._fallback_from = fallback_from
 
         logger.info(
             "ShortTermMemory initialized "
@@ -371,11 +426,35 @@ class ShortTermMemory:
 
     async def health(self) -> Dict[str, str]:
         """Report whether the selected backend is available."""
-        return await self._adapter.health()
+        health = await self._adapter.health()
+        if self._fallback_from:
+            return {
+                **health,
+                "status": "degraded",
+                "configured_backend": self._fallback_from,
+            }
+        return health
 
     async def close(self) -> None:
         """Release backend connections when supported."""
         await self._adapter.close()
+
+    @asynccontextmanager
+    async def session_scope(self, session_id: str) -> AsyncIterator[None]:
+        """Serialize complete runs for one session in the current event loop."""
+        self._validate_session_id(session_id)
+        lock_key = (asyncio.get_running_loop(), session_id)
+        with _SESSION_RUN_LOCKS_GUARD:
+            entry = _SESSION_RUN_LOCKS.setdefault(lock_key, _SessionRunLock())
+            entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            with _SESSION_RUN_LOCKS_GUARD:
+                entry.users -= 1
+                if entry.users == 0:
+                    _SESSION_RUN_LOCKS.pop(lock_key, None)
 
     def _create_adapter(
         self,
@@ -415,8 +494,14 @@ async def create_short_term_memory() -> ShortTermMemory:
         "SHORT_TERM_MEMORY_MAX_MESSAGES",
         DEFAULT_MAX_MESSAGES,
     )
+    allow_fallback = _boolean_env(
+        "SHORT_TERM_MEMORY_ALLOW_FALLBACK",
+        True,
+    )
 
+    fallback_from = None
     if storage_type == "redis":
+        redis_failure: Optional[Exception] = None
         try:
             memory = ShortTermMemory(
                 storage_type="redis",
@@ -427,18 +512,30 @@ async def create_short_term_memory() -> ShortTermMemory:
             if (await memory.health())["status"] == "ok":
                 return memory
             await memory.close()
+            redis_failure = ShortTermMemoryUnavailable(
+                "Redis health check reported a degraded status"
+            )
         except Exception as exc:
-            logger.warning(f"Redis unavailable; falling back to memory: {exc}")
-    elif storage_type != "memory":
+            redis_failure = exc
+        if not allow_fallback:
+            raise ShortTermMemoryUnavailable(
+                "Redis short-term memory is required but unavailable"
+            ) from redis_failure
         logger.warning(
-            f"Unknown SHORT_TERM_MEMORY_BACKEND={storage_type!r}; "
-            "falling back to memory"
+            f"Redis unavailable; falling back to memory: {redis_failure}"
+        )
+        fallback_from = "redis"
+    elif storage_type != "memory":
+        raise ValueError(
+            f"Unsupported SHORT_TERM_MEMORY_BACKEND={storage_type!r}; "
+            "expected 'memory' or 'redis'"
         )
 
     return ShortTermMemory(
         storage_type="memory",
         ttl_seconds=ttl_seconds,
         max_messages=max_messages,
+        fallback_from=fallback_from,
     )
 
 
@@ -455,3 +552,16 @@ def _positive_int_env(name: str, default: int) -> int:
         logger.warning(f"{name} must be positive; using {default}")
         return default
     return value
+
+
+def _boolean_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning(f"Invalid {name}={raw_value!r}; using {default}")
+    return default

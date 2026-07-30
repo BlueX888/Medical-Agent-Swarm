@@ -347,7 +347,8 @@ $env:LANGSMITH_PROJECT = "medical-agent-swarm"
 ```
 
 When enabled, traces include the top-level `medical_swarm_request`, LangGraph
-node spans such as `graph.plan_and_decompose`, and LLM spans from `LLMClient`.
+node spans such as `graph.plan_and_decompose`, `agent.<agent_id>`,
+`llm.<purpose>`, `tool.<tool_name>`, and `safety.runtime_guard`.
 Because this is a medical assistant prototype, message text, questions,
 answers, context, tool arguments, and similar payloads are redacted by default
 before they are sent to LangSmith. Use safe synthetic data before setting:
@@ -357,6 +358,11 @@ $env:LANGSMITH_REDACT_MEDICAL_TEXT = "false"
 ```
 
 Do not enable unredacted tracing with real patient information or other PHI.
+Set `OBSERVABILITY_HASH_KEY` to a deployment secret if a keyed `session_ref` is
+needed; without that key, no session reference is exported. See the
+[Agent Observability MVP runbook](docs/agent-observability-mvp-runbook.md) for
+the schema, dashboard queries, verification, incident response, and shutdown
+procedure.
 
 ## License
 

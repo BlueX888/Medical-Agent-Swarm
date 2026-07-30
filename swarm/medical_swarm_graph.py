@@ -780,14 +780,33 @@ class MedicalSwarmGraph:
                 name=f"graph.{name}",
                 run_type="chain",
                 func=execute_node,
-                inputs=self._debug_state_snapshot(state),
+                inputs={
+                    "state_keys": sorted(
+                        key for key in state if key != "debug_collector"
+                    ),
+                    "state_key_count": len(
+                        [key for key in state if key != "debug_collector"]
+                    ),
+                },
                 metadata={
                     "stage": stage,
-                    "node": name,
+                    "graph_node": name,
                     "session_id": state.get("session_id"),
                     "route": state.get("route") or state.get("mode"),
+                    "run_id": getattr(
+                        self._get_debug_collector(state),
+                        "run_id",
+                        None,
+                    ),
+                    "status": "success",
                 },
                 tags=["medical-agent-swarm", "langgraph-node", stage],
+                output_mapper=lambda output: {
+                    "status": "success",
+                    "output_keys": sorted(output.keys())
+                    if isinstance(output, dict)
+                    else [],
+                },
             )
 
         return wrapped
@@ -1094,10 +1113,40 @@ class MedicalSwarmGraph:
             )
 
         safety_guard = SafetyGuard()
-        safety_result = await safety_guard.review(
-            response=result.get("answer", "") or "",
-            original_question=state.get("question", "") or "",
-            risk_level=risk_level,
+        safety_result = await trace_async(
+            name="safety.runtime_guard",
+            run_type="chain",
+            func=lambda: safety_guard.review(
+                response=result.get("answer", "") or "",
+                original_question=state.get("question", "") or "",
+                risk_level=risk_level,
+            ),
+            inputs={
+                "answer_length": len(result.get("answer", "") or ""),
+                "question_present": bool(state.get("question")),
+                "risk_level": risk_level or "unknown",
+            },
+            metadata={
+                "run_id": getattr(collector, "run_id", None),
+                "session_id": state.get("session_id"),
+                "route": state.get("route") or state.get("mode"),
+                "status": "success",
+                "safety.executed": True,
+            },
+            tags=["medical-agent-swarm", "safety"],
+            output_mapper=lambda value: {
+                "safety.executed": bool(value.get("safety_checked")),
+                "safety.passed": bool(value.get("safety_passed")),
+                "safety.modified": (
+                    value.get("answer", "") != (result.get("answer", "") or "")
+                ),
+                "safety.issue_count": len(value.get("safety_issues", []) or []),
+                "safety.outcome": (
+                    "success"
+                    if value.get("safety_checked")
+                    else "error"
+                ),
+            },
         )
         if timer:
             timer.finish(

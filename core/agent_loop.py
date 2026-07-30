@@ -7,11 +7,17 @@ Agent循环引擎
 import uuid
 import json
 import inspect
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 from loguru import logger
 
 from .state_manager import TaskStatus, AgentState
 from .llm_client import LLMResponse
+from .observability import (
+    classify_tool_result,
+    summarize_tool_input,
+    summarize_tool_trace_output,
+    trace_async,
+)
 
 # Harness Engineering: runtime behavior constraints
 try:
@@ -103,7 +109,43 @@ class AgentLoop:
             filtered_tools.append(tool)
         return filtered_tools
 
-    async def run(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
+    async def run(
+        self,
+        agent,
+        input_data: Dict[str, Any],
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute one agent as a child span of the current graph/request trace."""
+        debug_collector = input_data.get("debug_collector")
+        run_id = getattr(debug_collector, "run_id", None)
+        return await trace_async(
+            name=f"agent.{agent.agent_id}",
+            run_type="chain",
+            func=lambda: self._run_impl(agent, input_data, session_id),
+            inputs={
+                "input_keys": sorted(
+                    key for key in input_data if key != "debug_collector"
+                ),
+                "input_count": len(
+                    [key for key in input_data if key != "debug_collector"]
+                ),
+            },
+            metadata={
+                "run_id": run_id,
+                "session_id": session_id,
+                "agent_id": agent.agent_id,
+                "status": "success",
+            },
+            tags=["medical-agent-swarm", "agent"],
+            output_mapper=lambda result: {
+                "status": "success" if result.get("answer") else "failed",
+                "iterations": result.get("iterations", 0),
+                "tool_call_count": self.tool_call_count,
+                "answer_length": len(result.get("answer", "") or ""),
+            },
+        )
+
+    async def _run_impl(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> Dict[str, Any]:
         """
         执行Agent循环
 
@@ -174,7 +216,29 @@ class AgentLoop:
 
             # 获取 Agent 的 Skills (OpenAI format)
             tool_policy = self._normalize_tool_policy(loop_input_data.get("tool_policy"))
+            registered_tools = self._get_tools_for_llm(
+                agent,
+                {"allow_tools": [], "deny_tools": []},
+            )
             tools_openai_format = self._get_tools_for_llm(agent, tool_policy)
+            registered_tool_names = {
+                ((tool or {}).get("function") or {}).get("name")
+                for tool in registered_tools or []
+            }
+            registered_tool_names.discard(None)
+            registered_tool_argument_keys = {
+                ((tool or {}).get("function") or {}).get("name"): set(
+                    (
+                        (
+                            ((tool or {}).get("function") or {})
+                            .get("parameters", {})
+                            .get("properties", {})
+                        )
+                        or {}
+                    ).keys()
+                )
+                for tool in registered_tools or []
+            }
 
             logger.debug(
                 f"Agent has {len(tools_openai_format) if tools_openai_format else 0} skills available "
@@ -194,8 +258,9 @@ class AgentLoop:
                         tool_choice="auto",
                         temperature=agent.config.get('temperature', 0.7),
                         debug_collector=debug_collector,
-                        trace_name=f"{agent.agent_id}_iteration_{state.iteration}",
+                        trace_name=f"{agent.agent_id}.iteration",
                         agent_id=agent.agent_id,
+                        iteration=state.iteration,
                     )
 
                     # 记录中间结果
@@ -237,127 +302,18 @@ class AgentLoop:
                                 f"- 第 {self.tool_call_count} 次调用"
                             )
 
-                            if not self._is_tool_allowed(tool_call.name, tool_policy):
-                                reason = (
-                                    tool_policy.get("reason")
-                                    or f"Tool {tool_call.name} is not allowed for this request."
-                                )
-                                logger.warning(
-                                    f"Blocked tool call by policy: {tool_call.name} "
-                                    f"(agent={agent.agent_id}, reason={reason})"
-                                )
-                                tool_result = {
-                                    "success": False,
-                                    "error": f"Tool call blocked by policy: {tool_call.name}",
-                                    "skill": tool_call.name,
-                                    "policy_reason": reason,
-                                }
-                                if debug_collector:
-                                    debug_collector.record_event(
-                                        "constraint_check",
-                                        agent_id=agent.agent_id,
-                                        skill_name=tool_call.name,
-                                        name="tool_policy",
-                                        input={
-                                            "agent_id": agent.agent_id,
-                                            "tool_name": tool_call.name,
-                                            "tool_policy": tool_policy,
-                                        },
-                                        output=tool_result,
-                                        status="failed",
-                                        error=tool_result["error"],
-                                        metadata={
-                                            "iteration": state.iteration,
-                                            "tool_call_index": self.tool_call_count,
-                                        },
-                                    )
-                                messages.append(
-                                    agent.llm_client.create_tool_message(
-                                        tool_call_id=tool_call.id,
-                                        tool_name=tool_call.name,
-                                        result=tool_result
-                                    )
-                                )
-                                continue
-
-                            logger.debug(
-                                f"Executing: {tool_call.name}({tool_call.arguments}) "
-                                f"- 第 {self.tool_call_count} 次调用"
+                            tool_result = await self._execute_tool_request(
+                                agent=agent,
+                                tool_call=tool_call,
+                                tool_policy=tool_policy,
+                                registered_tool_names=registered_tool_names,
+                                registered_tool_argument_keys=(
+                                    registered_tool_argument_keys
+                                ),
+                                iteration=state.iteration,
+                                session_id=session_id,
+                                debug_collector=debug_collector,
                             )
-
-                            # Harness Engineering: 验证调用
-                            if self.validator:
-                                validation_result = self.validator.validate_tool_call(
-                                    agent.agent_id,
-                                    tool_call.name
-                                )
-                                if debug_collector:
-                                    debug_collector.record_event(
-                                        "constraint_check",
-                                        agent_id=agent.agent_id,
-                                        skill_name=tool_call.name,
-                                        name="validate_tool_call",
-                                        input={
-                                            "agent_id": agent.agent_id,
-                                            "tool_name": tool_call.name,
-                                        },
-                                        output=validation_result,
-                                        status="success" if validation_result.get("valid") else "failed",
-                                        error=None if validation_result.get("valid") else validation_result.get("reason"),
-                                        metadata={
-                                            "iteration": state.iteration,
-                                            "tool_call_index": self.tool_call_count,
-                                        },
-                                    )
-                                if not validation_result.get("valid"):
-                                    logger.warning(
-                                        f"⚠️ 约束警告: {validation_result.get('reason')}"
-                                    )
-
-                            skill_timer = None
-                            if debug_collector:
-                                skill_timer = debug_collector.time_event(
-                                    "skill_call",
-                                    agent_id=agent.agent_id,
-                                    skill_name=tool_call.name,
-                                    input=tool_call.arguments,
-                                    name=tool_call.name,
-                                    metadata={
-                                        "iteration": state.iteration,
-                                        "tool_call_id": tool_call.id,
-                                        "tool_call_index": self.tool_call_count,
-                                    },
-                                )
-
-                            try:
-                                tool_result = await agent.execute_tool(
-                                    tool_name=tool_call.name,
-                                    arguments=tool_call.arguments
-                                )
-                            except Exception as tool_exc:
-                                if skill_timer:
-                                    skill_timer.finish(
-                                        output={"error": str(tool_exc)},
-                                        status="failed",
-                                        error=str(tool_exc),
-                                    )
-                                raise
-
-                            if skill_timer:
-                                tool_error = (
-                                    tool_result.get("error")
-                                    if isinstance(tool_result, dict)
-                                    else None
-                                )
-                                tool_failed = (
-                                    isinstance(tool_result, dict)
-                                    and tool_result.get("success") is False
-                                ) or bool(tool_error)
-                                skill_timer.finish(
-                                    output=tool_result,
-                                    status="failed" if tool_failed else "success",
-                                    error=str(tool_error) if tool_error else None,
-                                )
                             extracted_risk_level = self._extract_risk_level(tool_call.name, tool_result)
                             if extracted_risk_level:
                                 latest_risk_level = extracted_risk_level
@@ -424,8 +380,9 @@ class AgentLoop:
                         tools=None,
                         temperature=0.7,
                         debug_collector=debug_collector,
-                        trace_name=f"{agent.agent_id}_forced_final",
+                        trace_name=f"{agent.agent_id}.forced_final",
                         agent_id=agent.agent_id,
+                        iteration=state.iteration,
                     )
 
                     final_answer = final_response.content or '抱歉，未能完成任务'
@@ -476,6 +433,198 @@ class AgentLoop:
             if agent_timer:
                 agent_timer.finish(status="failed", error=str(e), output={"error": str(e)})
             raise
+
+    async def _execute_tool_request(
+        self,
+        *,
+        agent: Any,
+        tool_call: Any,
+        tool_policy: Dict[str, Any],
+        registered_tool_names: Set[str],
+        registered_tool_argument_keys: Dict[str, Set[str]],
+        iteration: int,
+        session_id: Optional[str],
+        debug_collector: Any,
+    ) -> Any:
+        """Trace policy, validation, execution, and classification as one span."""
+        trace_tool_name = (
+            tool_call.name
+            if tool_call.name in registered_tool_names
+            else "unknown"
+        )
+        trace_state = {
+            "allowed": None,
+            "validation_passed": None,
+            "outcome": None,
+        }
+
+        async def execute_path() -> Any:
+            allowed = self._is_tool_allowed(tool_call.name, tool_policy)
+            trace_state["allowed"] = allowed
+            if not allowed:
+                reason = (
+                    tool_policy.get("reason")
+                    or "Tool is not allowed for this request."
+                )
+                logger.warning(
+                    "Blocked tool call by policy: {} (agent={})",
+                    tool_call.name,
+                    agent.agent_id,
+                )
+                blocked_result = {
+                    "success": False,
+                    "error": "Tool call blocked by policy",
+                    "skill": tool_call.name,
+                    "policy_reason": reason,
+                }
+                trace_state["outcome"] = "blocked"
+                if debug_collector:
+                    debug_collector.record_event(
+                        "constraint_check",
+                        agent_id=agent.agent_id,
+                        skill_name=tool_call.name,
+                        name="tool_policy",
+                        input={
+                            "agent_id": agent.agent_id,
+                            "tool_name": tool_call.name,
+                            "tool_policy": tool_policy,
+                        },
+                        output=blocked_result,
+                        status="failed",
+                        error=blocked_result["error"],
+                        metadata={
+                            "iteration": iteration,
+                            "tool_call_index": self.tool_call_count,
+                        },
+                    )
+                return blocked_result
+
+            logger.debug(
+                "Executing: {}({}) - 第 {} 次调用",
+                tool_call.name,
+                tool_call.arguments,
+                self.tool_call_count,
+            )
+            if self.validator:
+                validation_result = self.validator.validate_tool_call(
+                    agent.agent_id,
+                    tool_call.name,
+                )
+                trace_state["validation_passed"] = bool(
+                    validation_result.get("valid")
+                )
+                if debug_collector:
+                    debug_collector.record_event(
+                        "constraint_check",
+                        agent_id=agent.agent_id,
+                        skill_name=tool_call.name,
+                        name="validate_tool_call",
+                        input={
+                            "agent_id": agent.agent_id,
+                            "tool_name": tool_call.name,
+                        },
+                        output=validation_result,
+                        status=(
+                            "success"
+                            if validation_result.get("valid")
+                            else "failed"
+                        ),
+                        error=(
+                            None
+                            if validation_result.get("valid")
+                            else validation_result.get("reason")
+                        ),
+                        metadata={
+                            "iteration": iteration,
+                            "tool_call_index": self.tool_call_count,
+                        },
+                    )
+                if not validation_result.get("valid"):
+                    logger.warning(
+                        "⚠️ 约束警告: {}",
+                        validation_result.get("reason"),
+                    )
+
+            skill_timer = None
+            if debug_collector:
+                skill_timer = debug_collector.time_event(
+                    "skill_call",
+                    agent_id=agent.agent_id,
+                    skill_name=tool_call.name,
+                    input=tool_call.arguments,
+                    name=tool_call.name,
+                    metadata={
+                        "iteration": iteration,
+                        "tool_call_id": tool_call.id,
+                        "tool_call_index": self.tool_call_count,
+                    },
+                )
+            try:
+                result = await agent.execute_tool(
+                    tool_name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+            except Exception as tool_error:
+                trace_state["outcome"] = (
+                    "timeout"
+                    if isinstance(tool_error, TimeoutError)
+                    else "error"
+                )
+                if skill_timer:
+                    skill_timer.finish(
+                        output={"error": str(tool_error)},
+                        status="failed",
+                        error=str(tool_error),
+                    )
+                raise
+
+            trace_state["outcome"] = classify_tool_result(result)
+            if skill_timer:
+                result_error = (
+                    result.get("error")
+                    if isinstance(result, dict)
+                    else None
+                )
+                failed = trace_state["outcome"] == "error"
+                skill_timer.finish(
+                    output=result,
+                    status="failed" if failed else "success",
+                    error=str(result_error) if result_error else None,
+                )
+            return result
+
+        metadata = {
+            "run_id": getattr(debug_collector, "run_id", None),
+            "session_id": session_id,
+            "agent_id": agent.agent_id,
+            "tool.name": trace_tool_name,
+            "tool.call_index": self.tool_call_count,
+            "tool.iteration": iteration,
+            "tool.retry_count": 0,
+        }
+        return await trace_async(
+            name=f"tool.{trace_tool_name}",
+            run_type="tool",
+            func=execute_path,
+            inputs=summarize_tool_input(
+                trace_tool_name,
+                tool_call.arguments,
+                allowed_keys=registered_tool_argument_keys.get(
+                    trace_tool_name,
+                    set(),
+                ),
+            ),
+            metadata=metadata,
+            tags=["medical-agent-swarm", "tool"],
+            output_mapper=lambda value: {
+                **summarize_tool_trace_output(
+                    value,
+                    outcome=trace_state["outcome"],
+                ),
+                "tool.allowed": trace_state["allowed"],
+                "tool.validation_passed": trace_state["validation_passed"],
+            },
+        )
 
     def _initialize_messages(self, agent, input_data: Dict[str, Any], session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """初始化消息列表，包含历史对话上下文"""

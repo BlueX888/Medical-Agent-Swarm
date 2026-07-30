@@ -131,6 +131,8 @@ class LLMClient:
         debug_collector: Optional[Any] = None,
         trace_name: str = "llm_chat",
         agent_id: Optional[str] = None,
+        iteration: int = 0,
+        retry_count: int = 0,
         **kwargs
     ) -> str:
         """
@@ -178,7 +180,7 @@ class LLMClient:
             }
 
             response = await trace_async(
-                name=trace_name,
+                name=self._llm_span_name(trace_name),
                 run_type="llm",
                 func=lambda: self.client.chat.completions.create(**request_params),
                 inputs={
@@ -193,6 +195,8 @@ class LLMClient:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     tools_count=0,
+                    iteration=iteration,
+                    retry_count=retry_count,
                 ),
                 tags=["medical-agent-swarm", "llm"],
                 output_mapper=self._response_trace_output,
@@ -244,7 +248,11 @@ class LLMClient:
         """
         for attempt in range(max_retries):
             try:
-                return await self.chat(messages, **kwargs)
+                return await self.chat(
+                    messages,
+                    retry_count=attempt,
+                    **kwargs,
+                )
             except Exception as e:
                 if attempt == max_retries - 1:
                     raise
@@ -274,6 +282,8 @@ class LLMClient:
         debug_collector: Optional[Any] = None,
         trace_name: str = "llm_chat_with_tools",
         agent_id: Optional[str] = None,
+        iteration: int = 0,
+        retry_count: int = 0,
         **kwargs
     ) -> LLMResponse:
         """
@@ -332,7 +342,7 @@ class LLMClient:
                 )
 
             response = await trace_async(
-                name=trace_name,
+                name=self._llm_span_name(trace_name),
                 run_type="llm",
                 func=lambda: self.client.chat.completions.create(**request_params),
                 inputs={
@@ -350,6 +360,8 @@ class LLMClient:
                     max_tokens=max_tokens,
                     tools_count=len(tools or []),
                     tool_choice=tool_choice,
+                    iteration=iteration,
+                    retry_count=retry_count,
                 ),
                 tags=["medical-agent-swarm", "llm", "tools"],
                 output_mapper=self._response_trace_output,
@@ -462,13 +474,21 @@ class LLMClient:
         max_tokens: int,
         tools_count: int,
         tool_choice: Optional[str] = None,
+        iteration: int = 0,
+        retry_count: int = 0,
     ) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {
-            "trace_name": trace_name,
+            "llm.model": self.model_name,
+            "llm.provider": "openai-compatible",
+            "llm.purpose": trace_name,
+            "llm.agent_id": agent_id,
+            "llm.iteration": iteration,
+            "llm.retry_count": retry_count,
+            "llm.outcome": "success",
+            "status": "success",
             "agent_id": agent_id,
-            "model_type": self.model_type,
-            "tools_count": tools_count,
-            "tool_choice": tool_choice,
+            "llm.available_tools": tools_count,
+            "llm.tool_choice": tool_choice,
             "ls_provider": "openai-compatible",
             "ls_model_name": self.model_name,
             "ls_model_type": "chat",
@@ -478,28 +498,32 @@ class LLMClient:
         if debug_collector:
             run = debug_collector.get_run()
             metadata["session_id"] = run.session_id
-            metadata["debug_run_id"] = run.run_id
+            metadata["run_id"] = run.run_id
         return metadata
 
     def _response_trace_output(self, response: Any) -> Dict[str, Any]:
         choices = getattr(response, "choices", []) or []
         first_choice = choices[0] if choices else None
         message = getattr(first_choice, "message", None) if first_choice else None
-        tool_calls = []
+        tool_calls_count = 0
         if message and getattr(message, "tool_calls", None):
-            tool_calls = [
-                {
-                    "id": tool_call.id,
-                    "name": tool_call.function.name,
-                    "arguments": tool_call.function.arguments,
-                }
-                for tool_call in message.tool_calls
-            ]
+            tool_calls_count = len(message.tool_calls)
+        usage = self._usage_to_dict(getattr(response, "usage", None))
+        input_tokens = usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0
+        output_tokens = usage.get(
+            "output_tokens",
+            usage.get("completion_tokens", 0),
+        ) or 0
         return {
-            "content": getattr(message, "content", None) if message else None,
-            "tool_calls": tool_calls,
-            "finish_reason": getattr(first_choice, "finish_reason", None),
-            "usage": self._usage_to_dict(getattr(response, "usage", None)),
-            "model": getattr(response, "model", self.model_name),
-            "response_id": getattr(response, "id", None),
+            "status": "success",
+            "llm.input_tokens": input_tokens,
+            "llm.output_tokens": output_tokens,
+            "llm.total_tokens": usage.get("total_tokens", input_tokens + output_tokens) or 0,
+            "llm.finish_reason": getattr(first_choice, "finish_reason", None),
+            "llm.tool_calls_requested": tool_calls_count,
+            "llm.outcome": "success",
         }
+
+    def _llm_span_name(self, purpose: str) -> str:
+        normalized = purpose.removeprefix("llm.").replace("_", ".")
+        return f"llm.{normalized}"

@@ -13,7 +13,7 @@ from loguru import logger
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from core import LLMClient
 from core.observability import trace_async
-from debug import DebugTraceCollector
+from debug import DebugTraceCollector, summarize_debug_run
 from memory import (
     LongTermMemory,
     SessionSummaryManager,
@@ -154,7 +154,13 @@ class SwarmCoordinator:
                     "swarm_timeout_s": swarm_timeout_s or self.swarm_timeout_s,
                 },
                 metadata={
+                    "run_id": getattr(debug_collector, "run_id", None),
                     "session_id": session_id,
+                    "entrypoint": (
+                        (debug_collector.get_run().metadata or {}).get("source")
+                        if debug_collector
+                        else None
+                    ) or None,
                     "enable_swarm": self.enable_swarm,
                     "enable_short_term_memory": self.enable_short_term_memory,
                     "enable_long_term_memory": self.enable_long_term_memory,
@@ -162,7 +168,10 @@ class SwarmCoordinator:
                     "worker_count": len(self.worker_pool),
                 },
                 tags=["medical-agent-swarm", "request"],
-                output_mapper=self._trace_result_summary,
+                output_mapper=lambda state: self._trace_result_summary(
+                    state,
+                    debug_collector,
+                ),
             )
 
         if self.enable_short_term_memory and session_id:
@@ -172,17 +181,33 @@ class SwarmCoordinator:
             state = await invoke_graph()
         return state["result"]
 
-    def _trace_result_summary(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    def _trace_result_summary(
+        self,
+        state: Dict[str, Any],
+        debug_collector: Optional[DebugTraceCollector] = None,
+    ) -> Dict[str, Any]:
+        if debug_collector:
+            summary = summarize_debug_run(
+                debug_collector.get_run(),
+                debug_collector.get_events(),
+            )
+            return summary
         result = state.get("result") or {}
+        route = state.get("route") or state.get("mode") or "unknown"
+        if route not in {"single_agent", "swarm", "fallback"}:
+            route = "unknown"
+        timeout = bool(result.get("timeout_occurred"))
+        agents = result.get("agents_involved", []) or []
         return {
-            "session_id": state.get("session_id") or result.get("session_id"),
-            "route": state.get("route") or state.get("mode"),
-            "swarm_enabled": result.get("swarm_enabled"),
-            "timeout_occurred": result.get("timeout_occurred"),
-            "agents_involved": result.get("agents_involved", []),
-            "answer": result.get("answer"),
+            "status": "timeout" if timeout else "success",
+            "route": route,
+            "agent_count": len(set(agents)),
+            "llm_call_count": result.get("llm_call_count", 0),
+            "tool_call_count": result.get("tool_call_count", 0),
+            "tool_success_count": result.get("tool_success_count", 0),
             "safety_checked": result.get("safety_checked"),
             "safety_passed": result.get("safety_passed"),
+            "answer_length": len(result.get("answer", "") or ""),
         }
 
 

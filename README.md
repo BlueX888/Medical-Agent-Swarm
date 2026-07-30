@@ -2,7 +2,7 @@
 
 Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的多智能体医疗问答项目。
 
-系统会根据问题组织健康咨询、症状分析和医学研究 Agent 协作，并通过医疗 Skill 完成问诊信息收集、风险评估、症状模式分析、生活方式建议和资料检索。回答生成后，系统还会执行安全检查并补充必要的就医提醒。
+系统采用 Orchestrator–Worker 模式：Orchestrator 只负责理解意图、拆分必要任务并按能力匹配 Worker；Worker 自主通过 function calling 选择其白名单内的医疗 Skill。确定性代码负责医疗安全预检、计划校验、依赖调度、超时降级和最终安全检查。
 
 > 本项目处于研究原型阶段，仅用于学习、开发和技术验证，不能替代医生的诊断、处方或治疗。
 
@@ -16,11 +16,53 @@ Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的�
 - 输出安全检查：检查危险建议、过度诊断和用药风险
 - 多种使用方式：支持命令行、Python 调用和本地调试界面
 
-## 工作流程
+## Orchestrator–Worker 工作流程
 
 ![LangGraph 医疗多智能体系统流程图](assets/system-workflow.png)
 
-LangGraph 负责加载会话记忆、规划并路由任务、调度单 Agent 或多 Agent 协作，以及完成结果综合、安全检查和记忆保存。
+LangGraph 执行以下固定流程：
+
+```text
+用户请求
+  → 加载会话上下文
+  → 确定性医疗安全预检
+  → Orchestrator.plan(question, context) 生成 RoutePlan
+  → 强类型校验、运行时 Agent Catalog 校验与确定性修复
+  → single / parallel / sequential 执行
+  → Worker 自主选择允许的 Skill
+  → 结果综合
+  → SafetyGuard 最终检查
+  → 保存记忆并返回兼容结果
+```
+
+Orchestrator 对外只有一个主要规划接口：
+
+```python
+route_plan = await orchestrator.plan(
+    question=question,
+    context=enhanced_context,
+)
+```
+
+`RoutePlan` 包含 `intent_summary`、`intents`、`risk_level`、`confidence`、
+`tasks`、`execution_mode`、`source`、`reasons` 和
+`needs_clarification`。每个 `PlannedTask` 只声明目标、所需能力、Worker、
+优先级和依赖，不指定具体 Skill。
+
+Agent Catalog 从运行时 `worker_pool` 及各 Worker 的 `get_capabilities()`
+动态生成。计划执行前会验证 Agent ID、能力匹配、任务预算、重复任务、依赖引用、
+循环依赖和高风险分诊要求。非法计划不会进入 Worker 执行阶段：可修复问题先做
+确定性修复，其余问题生成低置信度安全 fallback。
+
+执行模式不按任务数量机械决定：
+
+- 一个任务使用 `single`
+- 相互独立且属于不同 Worker 的任务使用 `parallel`
+- 存在依赖，或多个任务属于同一个有状态 Worker 时使用 `sequential`
+
+高风险和急症由确定性规则在 Worker 执行前强制处理。急症计划必须优先包含
+`diagnostic_agent` 的风险分诊任务，并会延后研究任务，避免等待外部资料检索。
+路由预检不能替代最终 `SafetyGuard`，每个最终回答仍会经过输出安全检查。
 
 当前内置的主要 Skill：
 
@@ -31,6 +73,22 @@ LangGraph 负责加载会话记忆、规划并路由任务、调度单 Agent 或
 | `analyze-symptoms` | 分析症状模式和可能方向，不直接给出确诊 |
 | `recommend-lifestyle` | 提供饮食、运动、睡眠等生活方式建议 |
 | `deep-research` | 搜索医学资料并综合多来源证据 |
+
+三个内置 Worker 的 Skill 白名单：
+
+| Worker | 可自主选择的 Skill |
+| --- | --- |
+| `consultation_agent` | `collect_clinical_context`、`assess_risk`、`analyze_symptoms`、`recommend_lifestyle` |
+| `diagnostic_agent` | `collect_clinical_context`、`assess_risk`、`analyze_symptoms` |
+| `research_agent` | `collect_clinical_context`、`deep_research` |
+
+### 扩展 Worker
+
+新增 Worker 时，实现稳定的 `agent_id`、`config["description"]` 和
+`get_capabilities()`，并把实例加入 `SwarmCoordinator.worker_pool`。Agent
+Catalog 会自动向 Orchestrator 暴露它，无需同步修改规划提示中的 Agent 清单。
+Worker 仍应继承 `BaseAgent`、通过自身白名单注册 Skill，并由 `AgentLoop` 执行；
+不要绕过 `SafetyGuard`。
 
 ## 环境要求
 

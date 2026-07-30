@@ -76,7 +76,9 @@ class ConstraintValidator:
     def validate_task_decomposition(
         self,
         question: str,
-        subtasks: List[Dict[str, Any]]
+        subtasks: List[Dict[str, Any]],
+        agent_catalog: Optional[Any] = None,
+        risk_level: str = "unknown",
     ) -> Dict[str, Any]:
         """
         验证任务分解是否合理（基于 Swarm 约束）
@@ -98,7 +100,44 @@ class ConstraintValidator:
 
         num_subtasks = len(subtasks)
 
+        if not subtasks:
+            issues.append("任务分解不能为空")
+
+        seen_descriptions = set()
+        for task in subtasks:
+            description = str(task.get("description") or task.get("goal") or "").strip()
+            if not description:
+                issues.append("子任务目标不能为空")
+            normalized = " ".join(description.lower().split())
+            if normalized in seen_descriptions:
+                issues.append(f"存在重复子任务：{description}")
+            seen_descriptions.add(normalized)
+
+            if agent_catalog is not None:
+                agent_id = str(task.get("assigned_agent") or "")
+                required = task.get("required_capabilities") or []
+                if not agent_catalog.has_agent(agent_id):
+                    issues.append(f"未知 Agent ID：{agent_id}")
+                elif required and not agent_catalog.supports(agent_id, required):
+                    issues.append(
+                        f"Agent {agent_id} 不具备所需能力：{required}"
+                    )
+
+        if risk_level in {"high", "emergency"} and agent_catalog is not None:
+            if not any(
+                agent_catalog.supports(
+                    str(task.get("assigned_agent") or ""),
+                    ["risk_assessment", "symptom_analysis"],
+                )
+                for task in subtasks
+            ):
+                issues.append("高风险计划缺少具备风险分诊能力的任务")
+
         # 检查是否匹配规则
+        research_request = any(
+            marker in question
+            for marker in ["指南", "循证", "研究", "文献", "专家共识"]
+        )
         for rule in rules:
             pattern = rule['pattern']
             keywords = pattern.split('|')
@@ -106,6 +145,14 @@ class ConstraintValidator:
             if any(kw in question for kw in keywords):
                 max_subtasks = rule.get('max_subtasks')
                 min_subtasks = rule.get('min_subtasks', 1)
+                if (
+                    research_request
+                    and num_subtasks > 1
+                    and rule["name"] in {"simple_query", "lifestyle_advice"}
+                ):
+                    # A guideline/evidence request plus practical advice is a
+                    # legitimate two-Worker multi-intent plan.
+                    max_subtasks = None
 
                 if max_subtasks and num_subtasks > max_subtasks:
                     issues.append(

@@ -1,5 +1,19 @@
 # Medical-Agent-Swarm 简历项目经历整理
 
+## 推荐投递版（Agent / 后端方向）
+
+**Medical-Agent-Swarm 医疗多智能体问答系统 | Agent 与后端开发**  
+**技术栈：** Python、LangGraph、LangChain Core、OpenAI SDK、FastAPI、Pydantic、Redis、asyncio、Mem0、DDGS / BeautifulSoup、Pytest
+
+- 基于 LangGraph 落地 Orchestrator–Worker 多 Agent 架构，将医疗问答拆分为咨询、症状分析和循证研究任务；由 Orchestrator 输出强类型 `RoutePlan`，结合任务依赖与 Worker 能力动态选择 single / parallel / sequential 执行模式，实现规划、路由、执行与结果综合的闭环。
+- 设计可扩展 Agent Catalog 与 Skill 机制：运行时发现 Worker 能力，通过 function calling 由 Worker 自主选择白名单内 Skill；在执行前校验 Agent ID、能力匹配、任务预算、重复任务和循环依赖，并对非法计划执行确定性修复或安全降级，降低 LLM 非确定性带来的失控风险。
+- 搭建 FastAPI 异步后端，提供任务创建与状态查询、执行事件追踪、Agent / Skill 元数据、会话记忆管理和健康检查等 REST API；基于 `asyncio` 执行后台 Agent 任务，并通过 Pydantic 统一请求、响应及路由计划的数据契约。
+- 短期记忆仅支持 Redis，实现会话 TTL、最近 20 轮上下文裁剪、同一会话串行化和故障感知；Redis 不可用时启动失败，运行期间健康检查暴露 degraded 状态，记忆接口以 HTTP 503 显式反馈后端故障，并可选接入 Mem0 实现长期语义记忆。
+- 建立贯穿 LangGraph 节点、Agent 调用和 Skill 执行的事件追踪能力，记录运行状态、耗时、路由来源与异常，配套 45 个自动化测试覆盖编排路由、依赖调度、Skill 白名单、会话记忆、Redis 集成和回归数据集，提升 Agent 链路的可观测性与可回归性。
+- 针对实时循证检索和冗余 Agent 调度造成的慢路径，引入 EvidenceMemory 本地证据缓存、DeepResearch cache-first、检索迭代上限与单 Agent 快路径；在 18 例 HealthBench-style 性能回归中实现 18/18 请求成功、0 超时 / 0 错误，P95 延迟 100.8s，较 baseline 平均 Token 降低 40.7%、单次成本降低 47.5%。
+
+> 指标口径：18/18 表示性能回归中的请求成功且无超时，不代表医学诊断准确率。
+
 ## 项目指标分析
 
 数据来源：`HEALTHBENCH_ZH18_MEMORY_OPT_V3_REPORT.md` 与同目录优化摘要。

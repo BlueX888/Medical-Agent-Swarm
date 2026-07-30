@@ -23,14 +23,14 @@ swarm:
 
     - name: "moderate_case"
       pattern: "两个症状|轻微既往史|简单组合"
-      min_subtasks: 2
+      min_subtasks: 1
       max_subtasks: 3
       reason: "中等复杂度，需要2-3个Agent协作"
       example: "头痛加恶心，严重吗？"
 
     - name: "complex_case"
       pattern: "多个症状|既往病史|综合管理|疑难症状|多系统"
-      min_subtasks: 2
+      min_subtasks: 1
       max_subtasks: 5
       reason: "复杂案例需要多角度深度分析"
       example: "35岁女性，持续头痛伴发热、颈部僵硬、恶心呕吐，有高血压病史"

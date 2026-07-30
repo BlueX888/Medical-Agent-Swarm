@@ -21,6 +21,7 @@ class MedicalSwarmState(TypedDict, total=False):
 
     assessment: Dict[str, Any]
     subtasks: List[Dict[str, Any]]
+    route_plan: Any
     route: str
     mode: str
 

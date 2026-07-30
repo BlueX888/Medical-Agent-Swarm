@@ -22,6 +22,7 @@ from memory import (
 )
 
 from .medical_swarm_graph import MedicalSwarmGraph
+from .agent_catalog import AgentCatalog
 
 @dataclass
 class _LoopDefaults:
@@ -75,6 +76,7 @@ class SwarmCoordinator:
             self.diagnostic_agent,
             self.research_agent,
         ]
+        self.agent_catalog = AgentCatalog(self.worker_pool)
 
         self.session_manager = SessionSummaryManager()
         self.short_term_memory = short_term_memory or ShortTermMemory()
@@ -93,6 +95,7 @@ class SwarmCoordinator:
             enable_short_term_memory=self.enable_short_term_memory,
             enable_long_term_memory=self.enable_long_term_memory,
             swarm_timeout=self.swarm_timeout_s,
+            agent_catalog=self.agent_catalog,
         )
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")

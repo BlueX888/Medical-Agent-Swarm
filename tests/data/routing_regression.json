@@ -1,0 +1,179 @@
+[
+  {
+    "name": "general_consultation",
+    "question": "什么是健康体检？",
+    "intents": ["general_consultation"],
+    "tasks": [
+      {
+        "id": "consult",
+        "goal": "解释健康体检的用途和一般注意事项",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["consultation_agent"],
+    "expected_risk": "low",
+    "expected_mode": "single"
+  },
+  {
+    "name": "symptom_triage",
+    "question": "低烧两天，需要去医院吗？",
+    "intents": ["symptom_triage"],
+    "tasks": [
+      {
+        "id": "triage",
+        "goal": "评估低烧的风险和就医时机",
+        "required_capabilities": ["risk_assessment", "symptom_triage"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["consultation_agent"],
+    "expected_risk": "medium",
+    "expected_mode": "single"
+  },
+  {
+    "name": "complex_symptoms",
+    "question": "头痛、恶心和视物模糊反复一周，可能是什么方向？",
+    "intents": ["diagnostic_reasoning"],
+    "tasks": [
+      {
+        "id": "diagnose",
+        "goal": "分析多个症状之间的关联并进行风险分诊",
+        "required_capabilities": ["symptom_analysis", "clinical_reasoning"],
+        "assigned_agent": "diagnostic_agent",
+        "priority": "high",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["diagnostic_agent"],
+    "expected_risk": "medium",
+    "expected_mode": "single"
+  },
+  {
+    "name": "lifestyle",
+    "question": "怎样通过饮食和运动改善睡眠？",
+    "intents": ["lifestyle_guidance"],
+    "tasks": [
+      {
+        "id": "lifestyle",
+        "goal": "提供可执行的饮食、运动和睡眠习惯建议",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["consultation_agent"],
+    "expected_risk": "low",
+    "expected_mode": "single"
+  },
+  {
+    "name": "evidence_research",
+    "question": "请总结慢性疼痛管理的循证指南。",
+    "intents": ["evidence_research"],
+    "tasks": [
+      {
+        "id": "research",
+        "goal": "检索并综合慢性疼痛管理指南",
+        "required_capabilities": ["guideline_lookup", "evidence_synthesis"],
+        "assigned_agent": "research_agent",
+        "priority": "high",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["research_agent"],
+    "expected_risk": "low",
+    "expected_mode": "single"
+  },
+  {
+    "name": "multiple_intents",
+    "question": "请给我脂肪肝指南依据，并给出饮食建议。",
+    "intents": ["evidence_research", "lifestyle_guidance"],
+    "tasks": [
+      {
+        "id": "research",
+        "goal": "检索并综合脂肪肝管理指南",
+        "required_capabilities": ["guideline_lookup"],
+        "assigned_agent": "research_agent",
+        "priority": "high",
+        "depends_on": []
+      },
+      {
+        "id": "consult",
+        "goal": "提供脂肪肝日常生活管理建议",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["research_agent", "consultation_agent"],
+    "expected_risk": "low",
+    "expected_mode": "parallel"
+  },
+  {
+    "name": "red_flag",
+    "question": "我现在胸痛并且呼吸困难。",
+    "intents": ["general_consultation"],
+    "tasks": [
+      {
+        "id": "wrong",
+        "goal": "进行一般科普",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["diagnostic_agent"],
+    "expected_risk": "emergency",
+    "expected_mode": "single",
+    "must_include": "diagnostic_agent"
+  },
+  {
+    "name": "ambiguous",
+    "question": "这个情况怎么办？",
+    "intents": ["general_consultation"],
+    "tasks": [
+      {
+        "id": "clarify",
+        "goal": "根据已有上下文回答，并在信息不足时追问",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["consultation_agent"],
+    "expected_risk": "unknown",
+    "expected_mode": "single",
+    "needs_clarification": true
+  },
+  {
+    "name": "multi_turn_reference",
+    "question": "那饮食方面呢？",
+    "context": {
+      "recent_history": [
+        {"role": "user", "content": "我刚被告知有脂肪肝"}
+      ]
+    },
+    "intents": ["lifestyle_guidance"],
+    "tasks": [
+      {
+        "id": "followup",
+        "goal": "结合上一轮脂肪肝背景提供饮食建议",
+        "required_capabilities": ["general_health_advice"],
+        "assigned_agent": "consultation_agent",
+        "priority": "normal",
+        "depends_on": []
+      }
+    ],
+    "expected_agents": ["consultation_agent"],
+    "expected_risk": "low",
+    "expected_mode": "single"
+  }
+]

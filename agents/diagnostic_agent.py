@@ -37,16 +37,24 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
         config: Optional[Dict[str, Any]] = None,
         llm_client: Optional[LLMClient] = None
     ):
+        self.allowed_skill_names = [
+            "collect_clinical_context",
+            "assess_risk",
+            "analyze_symptoms",
+        ]
         config = config or {}
         config.setdefault('max_iterations', 5)
+        config.setdefault(
+            "description",
+            "复杂症状分析、风险分诊和临床推理",
+        )
 
         super().__init__(agent_id, config, llm_client)
 
-        # 允许注册的 Skills（白名单过滤）
-        self.allowed_skill_names = ["collect_clinical_context", "assess_risk", "analyze_symptoms"]
-
         # 设置能力标签（Swarm 协作用）
         self.set_capabilities([
+            "risk_assessment",
+            "symptom_triage",
             "symptom_analysis",
             "differential_diagnosis",
             "clinical_reasoning",
@@ -71,12 +79,7 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
 - 明确需要进一步检查的项目
 - 永远不做确诊，只提供诊断思路
 
-**可用 Skills（5个）**：
-1. collect_clinical_context: 抽取问诊信息、识别缺失字段并生成追问
-2. assess_risk: 评估症状风险等级（低/中/高/紧急）
-3. analyze_symptoms: 分析症状模式和可能方向，避免确诊表达
-4. recommend_lifestyle: 低风险问题的生活方式建议和用药安全提醒
-5. deep_research: 仅在用户明确要求指南、循证证据、文献或最新研究时进行深度研究
+你可用的 Skills 以系统注入的 function schema 为准；不要尝试调用未提供的工具。
 
 **自动注入信息**：
 - 当前会话历史 recent_history 和相似历史案例 historical_cases 会由系统自动注入上下文/背景信息，无需手动调用 Skill
@@ -86,8 +89,7 @@ class DiagnosticAgent(BaseAgent, SkillRegistryMixin):
 - 首先使用 collect_clinical_context 整理问诊信息和缺失项
 - 然后使用 assess_risk 评估风险
 - 再使用 analyze_symptoms 分析模式和可能方向
-- 低风险、生活方式相关问题可使用 recommend_lifestyle
-- 只有指南、循证、文献或最新研究类问题才使用 deep_research；普通症状分析和急症分诊默认不要使用
+- 生活方式建议和循证研究由 Orchestrator 分配给相应 Worker
 - 最终回答前确保措辞谨慎；系统会在输出前强制执行 SafetyGuard
 - 基于 Skill 结果进行诊断推理
 - 通常最多2-4次 Skill 调用，然后给出诊断思路；不要尝试调用 safety_check，系统最终会强制兜底

@@ -17,6 +17,14 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
     """
 
     def __init__(self, config: Dict[str, Any] = None):
+        # BaseAgent registers Skills during construction, so the whitelist must
+        # exist before super().__init__ invokes register_tools().
+        self.allowed_skill_names = [
+            "collect_clinical_context",
+            "assess_risk",
+            "analyze_symptoms",
+            "recommend_lifestyle",
+        ]
         default_config = {
             "model": "openai_compatible",
             "max_iterations": 5,
@@ -30,9 +38,6 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
             config=config
         )
 
-        # 允许注册的 Skills（白名单过滤）
-        self.allowed_skill_names = ["collect_clinical_context", "assess_risk", "analyze_symptoms", "recommend_lifestyle"]
-
         # 设置能力标签（Swarm 协作用）
         self.set_capabilities([
             "general_health_advice",
@@ -44,12 +49,7 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
         """获取系统提示词"""
         return """你是一位专业的医疗健康咨询顾问。你的职责是提供准确、专业的健康建议和疾病科普。
 
-可用 Skills（5个）：
-1. collect_clinical_context: 抽取问诊信息、识别缺失字段并生成追问
-2. assess_risk: 评估症状风险等级（低/中/高/紧急）
-3. analyze_symptoms: 分析症状模式和可能方向，避免确诊表达
-4. recommend_lifestyle: 根据低风险问题提供生活方式建议（饮食、运动、睡眠、用药安全）
-5. deep_research: 仅在用户明确要求指南、循证证据、文献或最新研究时进行深度研究（网络搜索+证据综合）
+你可用的 Skills 以系统注入的 function schema 为准；不要尝试调用未提供的工具。
 
 **自动注入信息**：
 - 当前会话历史 recent_history 和相似历史案例 historical_cases 会由系统自动注入上下文/背景信息，无需手动调用 Skill
@@ -67,7 +67,7 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
 2. 症状或健康风险问题先使用 collect_clinical_context 补全关键信息
 3. 再使用 assess_risk 判断紧急程度
 4. 需要解释症状时使用 analyze_symptoms；低风险生活方式问题再用 recommend_lifestyle
-5. 只有指南、循证、文献或最新研究类问题才使用 deep_research；基础科普、急症分诊和普通症状分析默认不要使用
+5. 指南、循证、文献或最新研究请求由 Orchestrator 分配给 ResearchAgent
 6. 最终回答前确保措辞谨慎；系统会在输出前强制执行 SafetyGuard
 
 回答要求：
@@ -134,6 +134,13 @@ class ConsultationAgent(BaseAgent, SkillRegistryMixin):
             if other_context:
                 context_str = "\n".join([f"{k}: {v}" for k, v in other_context.items()])
                 parts.append(f"背景信息：\n{context_str}\n")
+
+        if input_data.get("risk_level"):
+            parts.append(f"路由风险级别：{input_data['risk_level']}")
+        if input_data.get("priority"):
+            parts.append(f"任务优先级：{input_data['priority']}")
+        if input_data.get("dependency_results"):
+            parts.append(f"前置任务结果：{input_data['dependency_results']}")
 
         # 添加用户问题
         parts.append(f"用户问题：{question}")

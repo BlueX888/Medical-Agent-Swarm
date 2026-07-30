@@ -38,13 +38,18 @@ class ResearchAgent(BaseAgent, SkillRegistryMixin):
         config: Optional[Dict[str, Any]] = None,
         llm_client: Optional[LLMClient] = None
     ):
+        self.allowed_skill_names = [
+            "deep_research",
+            "collect_clinical_context",
+        ]
         config = config or {}
         config.setdefault('max_iterations', 5)
+        config.setdefault(
+            "description",
+            "医学指南检索、文献研究和循证综合",
+        )
 
         super().__init__(agent_id, config, llm_client)
-
-        # 允许注册的 Skills（白名单过滤）
-        self.allowed_skill_names = ["deep_research", "collect_clinical_context"]
 
         # 设置能力标签
         self.set_capabilities([
@@ -75,12 +80,7 @@ class ResearchAgent(BaseAgent, SkillRegistryMixin):
 - 提供文献来源和发表年份
 - 明确指出信息的局限性和适用范围
 
-**可用 Skills（5个）**：
-1. collect_clinical_context: 抽取问诊信息、识别缺失字段并生成追问
-2. assess_risk: 评估症状风险等级（低/中/高/紧急）
-3. analyze_symptoms: 分析症状模式和可能方向，避免确诊表达
-4. recommend_lifestyle: 低风险问题的生活方式建议和用药安全提醒
-5. deep_research: 深度医学研究（网络搜索 + 证据综合，仅适用于指南、循证、文献或最新研究类请求）
+你可用的 Skills 以系统注入的 function schema 为准；不要尝试调用未提供的工具。
 
 **自动注入信息**：
 - 当前会话历史 recent_history 和相似历史案例 historical_cases 会由系统自动注入上下文/背景信息，无需手动调用 Skill
@@ -88,9 +88,6 @@ class ResearchAgent(BaseAgent, SkillRegistryMixin):
 
 **Skills 使用策略**：
 - 涉及具体患者症状时先使用 `collect_clinical_context`
-- 再使用 `assess_risk` 判断是否需要急诊或优先就医
-- 需要症状结构化分析时使用 `analyze_symptoms`
-- 低风险、生活方式相关问题可使用 `recommend_lifestyle`
 - 只有用户明确要求最新信息、复杂证据、文献或指南依据时才使用 `deep_research`
 - 最终回答前确保措辞谨慎；系统会在输出前强制执行 SafetyGuard
 - 通常最多 2-4 次 Skill 调用；不要尝试调用 safety_check，系统最终会强制兜底

@@ -14,7 +14,6 @@ agents:
       - assess_risk
       - analyze_symptoms
       - recommend_lifestyle
-      - deep_research
 
     # 禁止的行为
     forbidden_actions:
@@ -30,6 +29,8 @@ agents:
 
   diagnostic_agent:
     capabilities:
+      - risk_assessment
+      - symptom_triage
       - symptom_analysis
       - differential_diagnosis
       - clinical_reasoning
@@ -39,8 +40,6 @@ agents:
       - collect_clinical_context
       - assess_risk
       - analyze_symptoms
-      - recommend_lifestyle
-      - deep_research
 
     forbidden_actions:
       - recommend_specific_drugs  # 不建议具体药物（只能建议药物类别）
@@ -62,9 +61,6 @@ agents:
 
     allowed_tools:
       - collect_clinical_context
-      - assess_risk
-      - analyze_symptoms
-      - recommend_lifestyle
       - deep_research
 
     forbidden_actions:

@@ -6,7 +6,6 @@ memory injection, planning, conditional routing, worker execution, synthesis,
 memory persistence, and response shaping.
 """
 import asyncio
-import json
 import re
 import uuid
 from datetime import datetime
@@ -25,10 +24,19 @@ from memory import (
     ShortTermMemory,
     ShortTermMemoryError,
 )
-from memory.evidence_cache import EvidenceMemory
-
 from .medical_swarm_state import MedicalSwarmState
-from .shared_context import SharedContext, SubTask
+from .agent_catalog import AgentCatalog
+from .orchestrator import Orchestrator
+from .route_executor import RouteExecutor
+from .routing_models import (
+    ExecutionMode,
+    IntentType,
+    PlannedTask,
+    RiskLevel,
+    RoutePlan,
+    RouteSource,
+)
+from .shared_context import SharedContext
 
 
 class MedicalSwarmGraph:
@@ -49,9 +57,13 @@ class MedicalSwarmGraph:
         enable_long_term_memory: bool = True,
         swarm_timeout: float = 120.0,
         swarm_timeout_grace_s: float = 10.0,
+        agent_catalog: Optional[AgentCatalog] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.worker_pool = worker_pool
+        self.agent_catalog = agent_catalog or AgentCatalog(worker_pool)
+        self.orchestrator = Orchestrator(self.llm_client, self.agent_catalog)
+        self.route_executor = RouteExecutor(self.agent_catalog)
         self.consultation_agent = consultation_agent
         self.diagnostic_agent = diagnostic_agent
         self.research_agent = research_agent
@@ -252,66 +264,46 @@ class MedicalSwarmGraph:
         }
 
     async def plan_and_decompose(self, state: MedicalSwarmState) -> Dict[str, Any]:
-        """Use the planning node to decide worker subtasks."""
+        """Generate and validate one strongly typed RoutePlan."""
         question = state["question"]
         context = state.get("enhanced_context") or {}
-
-        memory_assessment = self._assessment_from_evidence_memory(question)
-        if memory_assessment:
-            subtasks = memory_assessment.get("subtasks", [])
-            collector = self._get_debug_collector(state)
-            if collector:
-                collector.record_event(
-                    "planning",
-                    name="evidence_memory_plan",
-                    input={"question": question},
-                    output=memory_assessment,
-                    metadata={
-                        "subtasks_count": len(subtasks),
-                        "source": "evidence_memory",
-                    },
-                )
-                collector.record_event(
-                    "constraint_check",
-                    name="validate_task_decomposition",
-                    input={"question": question, "subtasks": subtasks},
-                    output={
-                        "valid": True,
-                        "issues": [],
-                        "recommendations": [],
-                        "note": "Evidence memory shortcut generated a single-agent plan.",
-                    },
-                    metadata={"subtasks_count": len(subtasks)},
-                )
-            logger.info(
-                "MedicalSwarmGraph used evidence memory plan "
-                f"({memory_assessment.get('memory_id')}, {len(subtasks)} subtasks)"
-            )
-            return {"assessment": memory_assessment, "subtasks": subtasks}
-
-        messages = [
-            {"role": "system", "content": self._get_planning_prompt()},
-            {"role": "user", "content": f"问题：{question}\n\n背景：{context or '无'}"},
-        ]
-
-        try:
-            content = await self._call_llm_with_retry(messages, state)
-            logger.debug(f"MedicalSwarmGraph planning response: {content[:200]}...")
-            assessment = self._parse_planning_response(content)
-        except Exception as exc:
-            logger.error(f"MedicalSwarmGraph planning error after retries: {exc}")
-            assessment = {
-                "subtasks": [],
-                "reason": f"规划失败：{exc}",
+        route_plan = await self.orchestrator.plan(question=question, context=context)
+        subtasks = [
+            {
+                "id": task.id,
+                "type": f"{task.assigned_agent}_task",
+                "description": task.goal,
+                "goal": task.goal,
+                "required_capabilities": task.required_capabilities,
+                "assigned_agent": task.assigned_agent,
+                "priority": task.priority,
+                "depends_on": task.depends_on,
             }
-
-        subtasks = assessment.get("subtasks", [])
-        if not isinstance(subtasks, list):
-            subtasks = []
-            assessment["subtasks"] = subtasks
+            for task in route_plan.tasks
+        ]
+        assessment = {
+            "subtasks": subtasks,
+            "reason": "; ".join(route_plan.reasons),
+            "risk_level": route_plan.risk_level.value,
+            "intents": [intent.value for intent in route_plan.intents],
+            "confidence": route_plan.confidence,
+            "execution_mode": route_plan.execution_mode.value,
+            "source": route_plan.source.value,
+        }
 
         collector = self._get_debug_collector(state)
         if collector:
+            collector.record_event(
+                "planning",
+                name="route_plan",
+                input={"question": question, "context": context},
+                output=route_plan.model_dump(mode="json"),
+                metadata={
+                    "source": route_plan.source.value,
+                    "confidence": route_plan.confidence,
+                    "execution_mode": route_plan.execution_mode.value,
+                },
+            )
             collector.record_event(
                 "constraint_check",
                 name="validate_task_decomposition",
@@ -322,8 +314,7 @@ class MedicalSwarmGraph:
                 output={
                     "valid": True,
                     "issues": [],
-                    "recommendations": [],
-                    "note": "No swarm-level validator is wired in this graph yet.",
+                    "repairs": route_plan.reasons,
                 },
                 metadata={
                     "subtasks_count": len(subtasks),
@@ -331,15 +322,25 @@ class MedicalSwarmGraph:
             )
 
         logger.info(f"MedicalSwarmGraph planned {len(subtasks)} subtasks")
-        return {"assessment": assessment, "subtasks": subtasks}
+        return {
+            "route_plan": route_plan,
+            "assessment": assessment,
+            "subtasks": subtasks,
+        }
 
     async def route_by_subtasks(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Choose single-agent, swarm, or fallback route."""
         subtasks = state.get("subtasks") or []
+        route_plan = state.get("route_plan")
+        execution_mode = getattr(route_plan, "execution_mode", None)
 
-        if len(subtasks) == 1:
+        if execution_mode == ExecutionMode.SINGLE or (
+            execution_mode is None and len(subtasks) == 1
+        ):
             route = "single_agent"
-        elif len(subtasks) >= 2 and self.enable_swarm:
+        elif execution_mode in {ExecutionMode.PARALLEL, ExecutionMode.SEQUENTIAL} and self.enable_swarm:
+            route = "swarm"
+        elif execution_mode is None and len(subtasks) >= 2 and self.enable_swarm:
             route = "swarm"
         elif len(subtasks) == 0:
             route = "fallback"
@@ -360,8 +361,13 @@ class MedicalSwarmGraph:
             agent_id = agent.agent_id
         return await self._run_agent_exec(
             agent=agent,
-            question=state["question"],
-            enhanced_context=state.get("enhanced_context") or {},
+            question=task.get("goal") or task.get("description") or state["question"],
+            enhanced_context={
+                **(state.get("enhanced_context") or {}),
+                "original_user_question": state["question"],
+                "risk_level": self._extract_risk_level_from_state(state),
+                "priority": task.get("priority", "normal"),
+            },
             session_id=state["session_id"],
             collector=self._get_debug_collector(state),
             route_reason=f"单任务路由到 {agent_id}",
@@ -372,50 +378,42 @@ class MedicalSwarmGraph:
         """Run multi-worker collaboration inside a LangGraph node."""
         question = state["question"]
         session_id = state["session_id"]
-        assessment = state.get("assessment") or {}
         shared_context = SharedContext(session_id=session_id)
-        enhanced_context = state.get("enhanced_context") or {}
-
-        for worker in self.worker_pool:
-            worker.attach_shared_context(shared_context)
-
-        subtasks = self._create_subtasks(
-            assessment,
-            shared_context,
-            question=question,
-            context=enhanced_context,
-        )
+        enhanced_context = {
+            **(state.get("enhanced_context") or {}),
+            "original_user_question": question,
+        }
+        route_plan = self._route_plan_from_state(state)
+        subtasks = route_plan.tasks
         logger.info(f"Created {len(subtasks)} subtasks")
         collector = self._get_debug_collector(state)
         if collector:
             collector.record_event(
                 "planning",
                 name="subtasks_created",
-                input=assessment,
+                input=route_plan.model_dump(mode="json"),
                 output=[
                     {
                         "id": subtask.id,
-                        "type": subtask.type,
-                        "description": subtask.description,
+                        "type": f"{subtask.assigned_agent}_task",
+                        "description": subtask.goal,
                         "assigned_agent": subtask.assigned_agent,
-                        "tool_policy": subtask.metadata.get("tool_policy", {}),
+                        "depends_on": subtask.depends_on,
                     }
                     for subtask in subtasks
                 ],
             )
 
-        tasks = [
-            asyncio.create_task(
-                self._worker_execute_assigned_tasks(worker, shared_context, collector)
-            )
-            for worker in self.worker_pool
-        ]
-
         timeout_occurred = False
         effective_swarm_timeout = self._effective_swarm_timeout(state)
         try:
             await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=True),
+                self.route_executor.execute(
+                    route_plan,
+                    shared_context,
+                    enhanced_context,
+                    collector,
+                ),
                 timeout=effective_swarm_timeout,
             )
         except asyncio.TimeoutError:
@@ -429,6 +427,9 @@ class MedicalSwarmGraph:
             ]
             logger.info(f"Completed agents: {completed_agents}")
             logger.info(f"Timed out tasks: {unfinished_tasks}")
+            for subtask in shared_context.task_decomposition.values():
+                if subtask.status.value in {"pending", "claimed", "in_progress"}:
+                    subtask.fail("swarm_timeout")
 
         final_answer = await self._synthesize_results(
             question=question,
@@ -464,9 +465,15 @@ class MedicalSwarmGraph:
         }
 
     async def run_fallback(self, state: MedicalSwarmState) -> Dict[str, Any]:
-        """Fallback to ConsultationAgent for empty plans or disabled swarm."""
+        """Fallback to a risk-appropriate Worker."""
+        risk = self._extract_risk_level_from_state(state)
+        agent = (
+            self.diagnostic_agent
+            if risk in {"high", "emergency"}
+            else self.consultation_agent
+        )
         return await self._run_agent_exec(
-            agent=self.consultation_agent,
+            agent=agent,
             question=state["question"],
             enhanced_context=state.get("enhanced_context") or {},
             session_id=state["session_id"],
@@ -492,22 +499,37 @@ class MedicalSwarmGraph:
             assessment={},
             task=task or {},
         )
-        result = await agent.process(
-            {
-                "question": question,
-                "context": enhanced_context,
-                "conversation_history": enhanced_context.get("recent_history", []),
-                "session_id": session_id,
-                "tool_policy": tool_policy,
-                "debug_collector": collector,
+        try:
+            result = await agent.process(
+                {
+                    "question": question,
+                    "context": enhanced_context,
+                    "conversation_history": enhanced_context.get("recent_history", []),
+                    "session_id": session_id,
+                    "tool_policy": tool_policy,
+                    "debug_collector": collector,
+                }
+            )
+        except Exception as exc:
+            logger.error(f"{agent.agent_id} execution failed; returning safe degradation: {exc}")
+            urgent = enhanced_context.get("risk_level") in {"high", "emergency"}
+            result = {
+                "answer": (
+                    "系统暂时无法完成详细分析。若正在出现胸痛、呼吸困难、"
+                    "意识异常、严重过敏或持续大量出血，请立即拨打 120 或前往急诊。"
+                    if urgent
+                    else "系统暂时无法完成详细分析，请稍后重试；如症状持续或加重，请及时就医。"
+                ),
+                "error": str(exc),
+                "execution_failed": True,
             }
-        )
         final_answer = result.get("answer", "")
         result.update(
             {
                 "swarm_enabled": False,
                 "session_id": session_id,
                 "route_reason": route_reason,
+                "agents_involved": [agent.agent_id],
             }
         )
         result.setdefault(
@@ -677,6 +699,20 @@ class MedicalSwarmGraph:
                 "requested_swarm_timeout_s": state.get("swarm_timeout_s"),
                 "effective_swarm_timeout_s": state.get("effective_swarm_timeout_s"),
                 "suggestions": self._extract_suggestions(final_answer),
+                "unfinished_tasks": (
+                    [
+                        {
+                            "id": task.id,
+                            "assigned_agent": task.assigned_agent,
+                            "status": task.status.value,
+                            "error": (task.result or {}).get("error"),
+                        }
+                        for task in shared_context.task_decomposition.values()
+                        if task.status.value != "completed"
+                    ]
+                    if shared_context
+                    else []
+                ),
             }
 
             if timeout_occurred and not completed_agents:
@@ -702,31 +738,18 @@ class MedicalSwarmGraph:
                 "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
             )
 
+        route_plan = state.get("route_plan")
+        if isinstance(route_plan, RoutePlan):
+            result["routing"] = {
+                "intents": [intent.value for intent in route_plan.intents],
+                "risk_level": route_plan.risk_level.value,
+                "confidence": route_plan.confidence,
+                "execution_mode": route_plan.execution_mode.value,
+                "source": route_plan.source.value,
+            }
+        result.setdefault("timeout_occurred", bool(state.get("timeout_occurred", False)))
         result = await self._ensure_runtime_safety(state, result)
         return {"result": result}
-
-    async def _call_llm_with_retry(
-        self,
-        messages: List[Dict[str, Any]],
-        state: MedicalSwarmState,
-        max_retries: int = 2,
-    ) -> str:
-        """Call LLM with retry logic for transient failures."""
-        last_error = None
-        for attempt in range(max_retries + 1):
-            try:
-                return await self.llm_client.chat(
-                    messages,
-                    debug_collector=self._get_debug_collector(state),
-                    trace_name="plan_and_decompose",
-                )
-            except Exception as exc:
-                last_error = exc
-                if attempt < max_retries:
-                    wait = 2 ** attempt
-                    logger.warning(f"LLM call failed (attempt {attempt+1}), retrying in {wait}s: {exc}")
-                    await asyncio.sleep(wait)
-        raise last_error  # type: ignore
 
     def _trace_node(
         self,
@@ -839,12 +862,47 @@ class MedicalSwarmGraph:
         return state.get("route") or "fallback"
 
     def _get_agent_by_id(self, agent_id: Optional[str]):
-        mapping = {
-            "consultation_agent": self.consultation_agent,
-            "diagnostic_agent": self.diagnostic_agent,
-            "research_agent": self.research_agent,
-        }
-        return mapping.get(agent_id or "")
+        return self.agent_catalog.get_worker(agent_id or "")
+
+    def _route_plan_from_state(self, state: MedicalSwarmState) -> RoutePlan:
+        """Adapt legacy injected assessments used by callers and tests."""
+        route_plan = state.get("route_plan")
+        if isinstance(route_plan, RoutePlan):
+            return route_plan
+
+        legacy_tasks = []
+        for index, task in enumerate(state.get("subtasks") or [], 1):
+            agent_id = str(task.get("assigned_agent") or "consultation_agent")
+            capabilities = self.agent_catalog.capabilities_for(agent_id)
+            legacy_tasks.append(
+                PlannedTask(
+                    id=str(task.get("id") or f"legacy-{index}"),
+                    goal=str(task.get("goal") or task.get("description") or "回答用户问题"),
+                    required_capabilities=(
+                        task.get("required_capabilities")
+                        or capabilities[:1]
+                        or ["legacy_worker"]
+                    ),
+                    assigned_agent=agent_id,
+                    priority=str(task.get("priority") or "normal"),
+                    depends_on=list(task.get("depends_on") or []),
+                )
+            )
+        mode = (
+            ExecutionMode.SINGLE
+            if len(legacy_tasks) == 1
+            else ExecutionMode.PARALLEL
+        )
+        return RoutePlan(
+            intent_summary="兼容旧版注入计划",
+            intents=[IntentType.GENERAL_CONSULTATION],
+            risk_level=RiskLevel.UNKNOWN,
+            confidence=0,
+            tasks=legacy_tasks,
+            execution_mode=mode,
+            source=RouteSource.FALLBACK,
+            reasons=["legacy assessment adapter"],
+        )
 
     def _effective_swarm_timeout(self, state: MedicalSwarmState) -> float:
         """Return the worker-execution timeout for this request."""
@@ -867,44 +925,6 @@ class MedicalSwarmGraph:
             return max(1.0, remaining_s)
 
         return requested_timeout
-
-    def _assessment_from_evidence_memory(self, question: str) -> Optional[Dict[str, Any]]:
-        """Create a single-agent plan when local evidence memory has a strong hit."""
-        try:
-            hit = EvidenceMemory().lookup(question, min_score=0.9)
-        except Exception as exc:
-            logger.warning(f"Evidence memory planning lookup failed: {exc}")
-            return None
-
-        if not hit:
-            return None
-
-        memory_id = str(hit.get("id") or "")
-        # Data-driven routing: read preferred_agent from evidence entry
-        agent_id = hit.get("preferred_agent", "research_agent")
-        task_type = f"{agent_id}_task"
-        summary = str(hit.get("answer") or "")[:900]
-        description = (
-            "Use the local evidence memory below to answer the user's medical question. "
-            "Keep standard medical safety boundaries, avoid diagnosis certainty, and "
-            "recommend urgent care when red flags are present.\n\n"
-            f"User question: {question}\n\n"
-            f"Evidence memory ({memory_id}, score={hit.get('match_score')}):\n{summary}"
-        )
-
-        return {
-            "subtasks": [
-                {
-                    "type": task_type,
-                    "description": description,
-                    "assigned_agent": agent_id,
-                }
-            ],
-            "reason": "High-confidence local evidence memory hit; using single-agent plan to avoid redundant live research.",
-            "memory_id": memory_id,
-            "memory_source": hit.get("source", "evidence_memory"),
-            "memory_match_score": hit.get("match_score"),
-        }
 
     def _tool_policy_for_request(
         self,
@@ -954,131 +974,6 @@ class MedicalSwarmGraph:
 
         return ""
 
-    def _parse_planning_response(self, content: str) -> Dict[str, Any]:
-        json_match = re.search(r"\{.*\}", content or "", re.DOTALL)
-        if json_match:
-            result = json.loads(json_match.group())
-            if isinstance(result, dict):
-                return result
-
-        return {
-            "subtasks": [
-                {
-                    "type": "consultation_agent_task",
-                    "description": "回答用户问题",
-                    "assigned_agent": "consultation_agent",
-                }
-            ],
-            "reason": "无法解析 LLM 响应，默认使用 ConsultationAgent",
-        }
-
-    def _create_subtasks(
-        self,
-        decomposition_result: Dict[str, Any],
-        shared_context: SharedContext,
-        question: str = "",
-        context: Optional[Dict[str, Any]] = None,
-    ) -> List[SubTask]:
-        subtasks_data = decomposition_result.get("subtasks", [])
-        subtasks = []
-
-        for data in subtasks_data:
-            assigned_agent = data["assigned_agent"]
-            inferred_type = data.get("type") or f"{assigned_agent}_task"
-
-            subtask = SubTask(
-                id=str(uuid.uuid4()),
-                type=inferred_type,
-                description=data["description"],
-                assigned_agent=assigned_agent,
-                metadata={
-                    "tool_policy": self._tool_policy_for_request(
-                        question=question,
-                        context=context or {},
-                        assessment=decomposition_result,
-                        task=data,
-                    ),
-                    "conversation_history": list(
-                        (context or {}).get("recent_history") or []
-                    ),
-                },
-            )
-
-            shared_context.add_subtask(subtask)
-            subtasks.append(subtask)
-
-            logger.info(
-                f"Created SubTask: {subtask.type} "
-                f"(assigned to: {subtask.assigned_agent})"
-            )
-
-        return subtasks
-
-    async def _worker_execute_assigned_tasks(
-        self,
-        worker: Any,
-        shared_context: SharedContext,
-        debug_collector: Optional[DebugTraceCollector] = None,
-    ):
-        try:
-            assigned_tasks = shared_context.get_subtasks_for_agent(worker.agent_id)
-
-            if not assigned_tasks:
-                logger.debug(f"{worker.agent_id}: No assigned tasks")
-                return
-
-            tasks = []
-            for subtask in assigned_tasks:
-                logger.info(f"{worker.agent_id}: Starting {subtask.type}")
-                shared_context.start_subtask(subtask.id)
-                tasks.append(
-                    asyncio.create_task(
-                        self._execute_single_subtask(
-                            worker,
-                            subtask,
-                            shared_context,
-                            debug_collector,
-                        )
-                    )
-                )
-
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        except Exception as exc:
-            logger.error(f"{worker.agent_id}: Error processing subtask: {exc}")
-
-    async def _execute_single_subtask(
-        self,
-        worker: Any,
-        subtask: SubTask,
-        shared_context: SharedContext,
-        debug_collector: Optional[DebugTraceCollector] = None,
-    ):
-        timer = None
-        if debug_collector:
-            timer = debug_collector.time_event(
-                "agent_loop",
-                agent_id=worker.agent_id,
-                input={
-                    "subtask_id": subtask.id,
-                    "type": subtask.type,
-                    "description": subtask.description,
-                    "assigned_agent": subtask.assigned_agent,
-                },
-                name="subtask_execution",
-            )
-        try:
-            result = await worker.process_subtask(subtask, debug_collector=debug_collector)
-            shared_context.complete_subtask(subtask.id, worker.agent_id, result)
-            logger.info(f"{worker.agent_id}: Completed {subtask.type}")
-            if timer:
-                timer.finish(output=result)
-        except Exception as exc:
-            subtask.fail(str(exc))
-            logger.error(f"{worker.agent_id}: Error in {subtask.type}: {exc}")
-            if timer:
-                timer.finish(status="failed", error=str(exc), output={"error": str(exc)})
-
     async def _synthesize_results(
         self,
         question: str,
@@ -1111,17 +1006,22 @@ class MedicalSwarmGraph:
             completed_agents.append(contrib.agent_id)
 
         timeout_note = ""
-        if timeout_occurred:
-            incomplete_tasks = [
-                subtask.type
-                for subtask in shared_context.task_decomposition.values()
-                if subtask.status.value in {"pending", "claimed", "in_progress"}
-            ]
-            if incomplete_tasks:
+        incomplete_tasks = [
+            f"{subtask.type}（{subtask.status.value}）"
+            for subtask in shared_context.task_decomposition.values()
+            if subtask.status.value != "completed"
+        ]
+        if incomplete_tasks:
+            if timeout_occurred:
                 timeout_note = f"""
 
 **注意**：由于系统响应超时，以下分析模块未能完成：{', '.join(incomplete_tasks)}
 以下是基于已完成的 {len(completed_agents)} 个 Agent 的部分分析结果。"""
+            else:
+                timeout_note = f"""
+
+**注意**：以下分析模块未能完成：{', '.join(incomplete_tasks)}
+以下答案仅综合已成功完成的 {len(completed_agents)} 个 Agent 结果。"""
 
         synthesis_prompt = f"""你是医疗 Swarm 的结果综合节点，负责汇总多个专业 Worker Agent 的分析结果。
 
@@ -1140,7 +1040,7 @@ class MedicalSwarmGraph:
 4. 包含【风险评估】【诊断分析】【医学证据】等模块（如果相关 Agent 提供了）
 5. 给出【核心建议】
 6. 添加【免责声明】
-{"7. 如果有分析模块未完成，在答案中明确说明" if timeout_occurred else ""}
+{"7. 如果有分析模块未完成，在答案中明确说明" if incomplete_tasks else ""}
 
 **输出格式**：
 【风险评估】 (如果有)
@@ -1267,160 +1167,3 @@ class MedicalSwarmGraph:
             suggestions = matches[:5]
 
         return suggestions or ["请遵循医嘱，注意休息和营养"]
-
-    def _get_planning_prompt(self) -> str:
-        return """你是医疗 Swarm 的任务规划节点。你的职责是**分析问题并分配给合适的 Worker Agent**。
-
-**核心原则**：
-1. **尽量少分配任务**：能用 1 个 Agent 解决的，不要用 2 个；能用 2 个的，不要用 3 个
-2. **优先使用 ConsultationAgent**：对于常见病症（感冒、发烧、咳嗽等）、健康科普，单独使用 ConsultationAgent 就足够
-3. 你**只负责分配 Agent**，不决定具体使用哪些工具/技能（Worker Agent 会自己选择）
-4. 子任务应该相对独立，可以并行执行
-
----
-
-## 可用的 Worker Agents
-
-### 1. ConsultationAgent（健康咨询专家）
-**擅长**：
-- 常见疾病科普和健康建议
-- 症状初步评估和风险分级
-- 生活方式指导（饮食、运动、睡眠）
-- 日常健康管理
-
-**适用场景**：
-- 简单症状咨询（"我感冒了""头痛怎么办"）
-- 健康科普（"什么是高血压""多喝水的好处"）
-- 预防建议（"如何预防感冒"）
-- 生活方式指导（"高血压患者饮食注意什么"）
-
----
-
-### 2. DiagnosticAgent（诊断推理专家）
-**擅长**：
-- 症状模式分析和关联性评估
-- 鉴别诊断推理
-- 复杂症状的风险评估
-
-**适用场景**：
-- 复杂症状分析（"头痛+恶心+视力模糊"）
-- 多系统问题（"胸闷气短冒冷汗，严重吗"）
-- 症状持续加重（"头痛一周了越来越严重"）
-- 需要鉴别诊断的情况
-
----
-
-### 3. ResearchAgent（循证医学专家）
-**擅长**：
-- 临床指南和诊疗规范检索
-- 最新医学研究和证据综合
-- 权威治疗方案查询
-- 文献支持和证据等级评估
-
-**适用场景**：
-- 需要权威指南（"高血压最新诊疗指南"）
-- 询问标准治疗方案（"糖尿病如何治疗"）
-- 需要最新医学进展
-- 需要循证医学证据支持
-
----
-
-## 任务分配策略
-
-### 策略 1：简单问题 → 1 个 Agent（ConsultationAgent）
-**问题特征**：
-- 单一常见症状（感冒、发烧、头痛、咳嗽）
-- 健康科普和预防建议
-- 一般性健康咨询
-
-**示例**：
-- "我感冒了怎么办？" → ConsultationAgent
-- "什么是高血压？" → ConsultationAgent
-- "如何预防流感？" → ConsultationAgent
-- "糖尿病患者饮食注意什么？" → ConsultationAgent
-
----
-
-### 策略 2：复杂症状 → 2 个 Agents（DiagnosticAgent + ConsultationAgent）
-**问题特征**：
-- 多个症状组合（3个以上不同症状）
-- 症状持续时间长或加重
-- 明确询问严重程度或是否需要就医
-- 有既往病史或用药史
-
-**示例**：
-- "头痛一周了越来越严重，需要就医吗？" → DiagnosticAgent (评估风险) + ConsultationAgent (处理建议)
-- "胸闷气短冒冷汗，严重吗？" → DiagnosticAgent (症状分析) + ConsultationAgent (建议)
-
----
-
-### 策略 3：需要权威指南 → 2-3 个 Agents
-**问题特征**：
-- 询问疾病治疗方案
-- 需要标准诊疗规范
-- 需要权威指南和生活建议的综合方案
-
-**示例**：
-- "高血压如何治疗？" → ResearchAgent (指南) + ConsultationAgent (生活建议)
-- "糖尿病最新诊疗指南是什么？" → ResearchAgent
-
----
-
-## 输出格式（JSON）
-
-**重要**：输出中**不需要 `type` 字段**，只需要 `description`（任务描述）和 `assigned_agent`（分配的 Agent）
-
-### 示例 1：简单问题（1 个 Agent）
-```json
-{
-  "subtasks": [
-    {
-      "description": "回答用户关于感冒的咨询，提供处理建议和注意事项",
-      "assigned_agent": "consultation_agent"
-    }
-  ]
-}
-```
-
-### 示例 2：复杂症状（2 个 Agents）
-```json
-{
-  "subtasks": [
-    {
-      "description": "评估头痛症状的风险等级、紧急程度，分析症状模式和可能原因",
-      "assigned_agent": "diagnostic_agent"
-    },
-    {
-      "description": "提供头痛的处理建议、缓解方法和注意事项",
-      "assigned_agent": "consultation_agent"
-    }
-  ]
-}
-```
-
-### 示例 3：需要指南（2 个 Agents）
-```json
-{
-  "subtasks": [
-    {
-      "description": "检索高血压的最新临床诊疗指南和标准治疗方案",
-      "assigned_agent": "research_agent"
-    },
-    {
-      "description": "提供高血压患者的日常生活管理建议（饮食、运动、用药）",
-      "assigned_agent": "consultation_agent"
-    }
-  ]
-}
-```
-
----
-
-## 关键要点
-
-1. **只写 `description` 和 `assigned_agent`**
-2. **description 要具体**：明确说明这个 Agent 需要做什么
-3. **Agent 会自主选择工具**：你不需要指定使用哪个工具/技能
-4. **尽量少分配**：1 个 Agent 能搞定的，不要分配 2 个
-5. **任务要独立**：各个 Agent 的任务应该可以并行执行
-"""

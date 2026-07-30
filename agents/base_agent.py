@@ -95,13 +95,21 @@ class BaseAgent(ABC):
         Returns:
             格式化后的用户消息
         """
-        # 默认实现
-        if 'question' in input_data:
-            return input_data['question']
-        elif 'query' in input_data:
-            return input_data['query']
-        else:
+        question = input_data.get("question") or input_data.get("query")
+        if question is None:
             return str(input_data)
+
+        parts = [str(question)]
+        context = input_data.get("context")
+        if context:
+            parts.append(f"相关用户上下文：{context}")
+        if input_data.get("risk_level"):
+            parts.append(f"路由风险级别：{input_data['risk_level']}")
+        if input_data.get("priority"):
+            parts.append(f"任务优先级：{input_data['priority']}")
+        if input_data.get("dependency_results"):
+            parts.append(f"前置任务结果：{input_data['dependency_results']}")
+        return "\n\n".join(parts)
 
     async def post_process_result(
         self,
@@ -172,6 +180,16 @@ class BaseAgent(ABC):
             'subtask_type': subtask.type
         }
         metadata = getattr(subtask, "metadata", {}) or {}
+        if metadata.get("context"):
+            input_data["context"] = metadata["context"]
+        if metadata.get("risk_level"):
+            input_data["risk_level"] = metadata["risk_level"]
+        if metadata.get("priority"):
+            input_data["priority"] = metadata["priority"]
+        if metadata.get("dependency_results"):
+            input_data["dependency_results"] = metadata["dependency_results"]
+        if metadata.get("tool_strategy"):
+            input_data["tool_strategy"] = metadata["tool_strategy"]
         if metadata.get("tool_policy"):
             input_data["tool_policy"] = metadata["tool_policy"]
         if metadata.get("conversation_history"):

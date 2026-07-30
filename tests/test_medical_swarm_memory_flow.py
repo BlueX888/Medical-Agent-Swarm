@@ -4,6 +4,7 @@ from datetime import datetime
 import pytest
 
 from memory import ShortTermMemoryUnavailable
+from debug import DebugTraceCollector
 import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 from swarm.swarm_coordinator import SwarmCoordinator
@@ -300,3 +301,45 @@ async def test_full_swarm_workflow_persists_only_one_completed_turn(
         ("user", "需要多角度分析的问题"),
         ("assistant", state["result"]["answer"]),
     ]
+
+
+@pytest.mark.asyncio
+async def test_debug_swarm_records_validated_tasks_without_crashing(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+    consultation = FakeWorker("consultation_agent")
+    diagnostic = FakeWorker("diagnostic_agent")
+    graph = SwarmAcceptanceGraph(
+        llm_client=object(),
+        worker_pool=[consultation, diagnostic],
+        consultation_agent=consultation,
+        diagnostic_agent=diagnostic,
+        research_agent=FakeWorker("research_agent"),
+        short_term_memory=memory,
+        long_term_memory=DisabledLongTermMemory(),
+        session_manager=None,
+        enable_swarm=True,
+        enable_short_term_memory=False,
+        enable_long_term_memory=False,
+    )
+    collector = DebugTraceCollector(
+        question="需要多角度分析的问题",
+        context={},
+        session_id="debug-swarm",
+    )
+
+    state = await graph.ainvoke(
+        {
+            "question": "需要多角度分析的问题",
+            "session_id": "debug-swarm",
+            "context": {},
+            "debug_collector": collector,
+        }
+    )
+
+    assert state["result"]["swarm_enabled"] is True
+    assert any(
+        event.name == "subtasks_created"
+        for event in collector.get_events()
+    )

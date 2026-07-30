@@ -77,7 +77,7 @@ class SwarmCoordinator:
         ]
 
         self.session_manager = SessionSummaryManager()
-        self.short_term_memory = short_term_memory or ShortTermMemory(storage_type="memory")
+        self.short_term_memory = short_term_memory or ShortTermMemory()
         self.long_term_memory = LongTermMemory()
 
         self.medical_graph = MedicalSwarmGraph(

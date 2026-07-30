@@ -3,7 +3,7 @@ from datetime import datetime
 
 import pytest
 
-from memory import ShortTermMemory, ShortTermMemoryUnavailable
+from memory import ShortTermMemoryUnavailable
 import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 from swarm.swarm_coordinator import SwarmCoordinator
@@ -169,14 +169,16 @@ async def test_graph_continues_without_history_when_short_term_memory_is_unavail
 
 
 @pytest.mark.asyncio
-async def test_coordinators_serialize_concurrent_runs_for_the_same_session():
+async def test_coordinators_serialize_concurrent_runs_for_the_same_session(
+    short_term_memory_factory,
+):
     graph = ConcurrentRunProbe()
     first_coordinator = make_coordinator_for_concurrency(
-        ShortTermMemory(storage_type="memory"),
+        short_term_memory_factory(),
         graph,
     )
     second_coordinator = make_coordinator_for_concurrency(
-        ShortTermMemory(storage_type="memory"),
+        short_term_memory_factory(),
         graph,
     )
 
@@ -195,6 +197,7 @@ async def test_coordinators_serialize_concurrent_runs_for_the_same_session():
 
 def test_process_with_swarm_initializes_default_memory_once_per_event_loop(
     monkeypatch,
+    short_term_memory_factory,
 ):
     create_calls = 0
 
@@ -202,7 +205,7 @@ def test_process_with_swarm_initializes_default_memory_once_per_event_loop(
         nonlocal create_calls
         create_calls += 1
         await asyncio.sleep(0.05)
-        return ShortTermMemory(storage_type="memory")
+        return short_term_memory_factory()
 
     class CoordinatorProbe:
         def __init__(
@@ -263,8 +266,10 @@ async def test_graph_saves_exactly_one_user_visible_turn():
 
 
 @pytest.mark.asyncio
-async def test_full_swarm_workflow_persists_only_one_completed_turn():
-    memory = ShortTermMemory(storage_type="memory")
+async def test_full_swarm_workflow_persists_only_one_completed_turn(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
     consultation = FakeWorker("consultation_agent")
     diagnostic = FakeWorker("diagnostic_agent")
     graph = SwarmAcceptanceGraph(

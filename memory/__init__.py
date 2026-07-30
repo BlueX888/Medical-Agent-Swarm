@@ -2,13 +2,12 @@
 记忆系统：Agent 的持久化学习和记忆管理
 
 包含：
-- ShortTermMemory：会话级对话历史（默认内存）
+- ShortTermMemory：会话级对话历史（Redis）
 - LongTermMemory：可选跨会话记忆接口（默认禁用）
 """
 
 # 短期和长期记忆
 from .short_term import (
-    InMemoryShortTermMemoryAdapter,
     RedisShortTermMemoryAdapter,
     ShortTermMemory,
     ShortTermMemoryAdapter,
@@ -39,7 +38,6 @@ __all__ = [
     # 短期和长期记忆
     'ShortTermMemory',
     'ShortTermMemoryAdapter',
-    'InMemoryShortTermMemoryAdapter',
     'RedisShortTermMemoryAdapter',
     'ShortTermMemoryError',
     'ShortTermMemoryUnavailable',

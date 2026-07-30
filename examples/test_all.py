@@ -126,7 +126,7 @@ async def generate_test_report(passed: int, failed: int, total: int, context_awa
 
 ### 3. 记忆系统
 
-- ✅ **短期记忆**：会话级对话历史，默认内存存储
+- ✅ **短期记忆**：会话级对话历史，Redis 存储
 - ✅ **长期记忆接口**：保留可选跨会话记忆能力，默认禁用
 - {'✅' if context_aware else '⚠️'} **上下文利用**：{'多轮对话上下文正常' if context_aware else '需进一步优化'}
 
@@ -205,7 +205,7 @@ SafetyGuard runtime review
 | LLM | OpenAI Compatible API |
 | 核心医疗 Skills | 规则引擎 + 内置模板 |
 | 长期记忆 | 可选接口，默认禁用 |
-| 短期记忆 | 内存 |
+| 短期记忆 | Redis |
 | 网络搜索 | DuckDuckGo Search API |
 
 ---
@@ -537,7 +537,7 @@ async def test_short_term_memory():
     print("测试 4.1: 短期记忆（会话级对话历史）")
     print("="*70)
 
-    stm = ShortTermMemory(storage_type="memory")
+    stm = ShortTermMemory()
 
     session_id = "test-stm-001"
     await stm.save_turn(session_id, "我头痛", "建议休息并就医")
@@ -610,7 +610,7 @@ async def test_memory_integration():
     coordinator = SwarmCoordinator(enable_swarm=False)  # 使用单Agent简化测试
 
     print(f"\n📊 记忆系统状态:")
-    print(f"  - 短期记忆: {coordinator.short_term_memory.storage_type}")
+    print(f"  - 短期记忆: {coordinator.short_term_memory.backend_name}")
     print(f"  - 长期记忆: {'enabled' if coordinator.long_term_memory.enabled else 'disabled'}")
 
     # 使用固定 session_id 模拟多轮对话
@@ -1205,11 +1205,11 @@ async def test_singleton_instances():
     # 验证 ShortTermMemory 不再使用单例（各实例独立）
     print("\n🔍 验证 ShortTermMemory 非单例（独立实例）...")
 
-    mem1 = ShortTermMemory(storage_type='memory')
+    mem1 = ShortTermMemory()
     mem1_id = id(mem1)
     print(f"  - 第一次实例化: id={mem1_id}")
 
-    mem2 = ShortTermMemory(storage_type='memory')
+    mem2 = ShortTermMemory()
     mem2_id = id(mem2)
     print(f"  - 第二次实例化: id={mem2_id}")
 
@@ -1219,7 +1219,7 @@ async def test_singleton_instances():
 
     print("\n✅ 测试 7.3 通过！")
     print("  ✓ ShortTermMemory 单例已移除")
-    print("  ✓ 每个调用方获得独立实例，避免跨请求数据泄漏")
+    print("  ✓ 每个调用方获得独立客户端实例，共享 Redis 会话数据")
 
 
 async def test_memory_no_duplication():

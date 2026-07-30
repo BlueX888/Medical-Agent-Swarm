@@ -29,8 +29,14 @@ class UnavailableShortTermMemoryAdapter:
         return None
 
 
-def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch):
-    memory = ShortTermMemory(storage_type="memory", ttl_seconds=60)
+def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory(ttl_seconds=60)
+
+    async def create_application_short_term_memory():
+        return memory
 
     async def save_without_calling_a_model(
         coordinator,
@@ -52,6 +58,11 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch)
         "process",
         save_without_calling_a_model,
     )
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
 
     with TestClient(server.app) as client:
         server.app.state.short_term_memory = memory
@@ -59,7 +70,7 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch)
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json()["memory"] == {
-            "backend": "memory",
+            "backend": "redis",
             "status": "ok",
         }
 
@@ -82,7 +93,7 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch)
         response = client.get("/api/sessions/session-api/memory")
         assert response.status_code == 200
         payload = response.json()
-        assert payload["backend"] == "memory"
+        assert payload["backend"] == "redis"
         assert payload["ttl_seconds"] > 0
         assert [message["content"] for message in payload["recent_history"]] == [
             "问题",
@@ -101,8 +112,19 @@ def test_memory_api_uses_application_memory_and_can_clear_a_session(monkeypatch)
         ] == []
 
 
-def test_memory_api_returns_service_unavailable_when_redis_cannot_be_read():
+def test_memory_api_returns_service_unavailable_when_redis_cannot_be_read(
+    monkeypatch,
+):
     memory = ShortTermMemory(adapter=UnavailableShortTermMemoryAdapter())
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
 
     with TestClient(server.app) as client:
         server.app.state.short_term_memory = memory

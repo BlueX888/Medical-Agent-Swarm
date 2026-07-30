@@ -7,12 +7,9 @@ results, and debug traces stay in their request-local stores.
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
-import math
 import os
 import threading
-import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -110,12 +107,6 @@ class ShortTermMemoryAdapter(Protocol):
 
 
 @dataclass
-class _InMemorySession:
-    messages: List[Dict[str, Any]]
-    expires_at: float
-
-
-@dataclass
 class _SessionRunLock:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     users: int = 0
@@ -126,64 +117,6 @@ _SESSION_RUN_LOCKS: Dict[
     _SessionRunLock,
 ] = {}
 _SESSION_RUN_LOCKS_GUARD = threading.Lock()
-
-
-class InMemoryShortTermMemoryAdapter:
-    """Process-local adapter used for development, fallback, and tests."""
-
-    backend_name = "memory"
-
-    def __init__(self, ttl_seconds: int, max_messages: int):
-        self.ttl_seconds = ttl_seconds
-        self.max_messages = max_messages
-        self._sessions: Dict[str, _InMemorySession] = {}
-
-    async def load_messages(
-        self,
-        session_id: str,
-        message_limit: int,
-    ) -> List[Dict[str, Any]]:
-        self._purge_expired_session(session_id)
-        session = self._sessions.get(session_id)
-        if session is None:
-            return []
-        return copy.deepcopy(session.messages[-message_limit:])
-
-    async def save_messages(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-    ) -> None:
-        self._purge_expired_session(session_id)
-        existing = self._sessions.get(session_id)
-        history = list(existing.messages) if existing else []
-        history.extend(copy.deepcopy(messages))
-        self._sessions[session_id] = _InMemorySession(
-            messages=history[-self.max_messages :],
-            expires_at=time.monotonic() + self.ttl_seconds,
-        )
-
-    async def clear_session(self, session_id: str) -> bool:
-        self._purge_expired_session(session_id)
-        return self._sessions.pop(session_id, None) is not None
-
-    async def get_session_ttl(self, session_id: str) -> int:
-        self._purge_expired_session(session_id)
-        session = self._sessions.get(session_id)
-        if session is None:
-            return -2
-        return max(1, math.ceil(session.expires_at - time.monotonic()))
-
-    async def health(self) -> Dict[str, str]:
-        return {"backend": self.backend_name, "status": "ok"}
-
-    async def close(self) -> None:
-        return None
-
-    def _purge_expired_session(self, session_id: str) -> None:
-        session = self._sessions.get(session_id)
-        if session and session.expires_at <= time.monotonic():
-            self._sessions.pop(session_id, None)
 
 
 class RedisShortTermMemoryAdapter:
@@ -340,18 +273,16 @@ class RedisShortTermMemoryAdapter:
 
 
 class ShortTermMemory:
-    """Deep module exposing conversation behavior independently of storage."""
+    """Session-scoped conversation memory backed exclusively by Redis."""
 
     def __init__(
         self,
-        storage_type: str = "memory",
         redis_config: Optional[Dict[str, Any]] = None,
         *,
         redis_url: Optional[str] = None,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
         max_messages: int = DEFAULT_MAX_MESSAGES,
         adapter: Optional[ShortTermMemoryAdapter] = None,
-        fallback_from: Optional[str] = None,
     ):
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be greater than zero")
@@ -361,17 +292,18 @@ class ShortTermMemory:
         # Complete turns always contain two messages.
         self.ttl_seconds = int(ttl_seconds)
         self.max_messages = int(max_messages) - (int(max_messages) % 2)
-        self._adapter = adapter or self._create_adapter(
-            storage_type=storage_type,
-            redis_config=redis_config or {},
+        self._adapter = adapter or RedisShortTermMemoryAdapter(
+            ttl_seconds=self.ttl_seconds,
+            max_messages=self.max_messages,
             redis_url=redis_url,
+            redis_config=redis_config or {},
         )
-        self.storage_type = self._adapter.backend_name
-        self._fallback_from = fallback_from
+        if self._adapter.backend_name != "redis":
+            raise ValueError("ShortTermMemory adapters must use the Redis backend")
 
         logger.info(
             "ShortTermMemory initialized "
-            f"(backend={self.storage_type}, ttl={self.ttl_seconds}s, "
+            f"(backend={self.backend_name}, ttl={self.ttl_seconds}s, "
             f"max_messages={self.max_messages})"
         )
 
@@ -425,15 +357,8 @@ class ShortTermMemory:
         return await self._adapter.get_session_ttl(session_id)
 
     async def health(self) -> Dict[str, str]:
-        """Report whether the selected backend is available."""
-        health = await self._adapter.health()
-        if self._fallback_from:
-            return {
-                **health,
-                "status": "degraded",
-                "configured_backend": self._fallback_from,
-            }
-        return health
+        """Report whether Redis is available."""
+        return await self._adapter.health()
 
     async def close(self) -> None:
         """Release backend connections when supported."""
@@ -456,27 +381,6 @@ class ShortTermMemory:
                 if entry.users == 0:
                     _SESSION_RUN_LOCKS.pop(lock_key, None)
 
-    def _create_adapter(
-        self,
-        *,
-        storage_type: str,
-        redis_config: Dict[str, Any],
-        redis_url: Optional[str],
-    ) -> ShortTermMemoryAdapter:
-        if storage_type == "memory":
-            return InMemoryShortTermMemoryAdapter(
-                ttl_seconds=self.ttl_seconds,
-                max_messages=self.max_messages,
-            )
-        if storage_type == "redis":
-            return RedisShortTermMemoryAdapter(
-                ttl_seconds=self.ttl_seconds,
-                max_messages=self.max_messages,
-                redis_url=redis_url,
-                redis_config=redis_config,
-            )
-        raise ValueError("storage_type must be 'memory' or 'redis'")
-
     @staticmethod
     def _validate_session_id(session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id.strip():
@@ -484,8 +388,13 @@ class ShortTermMemory:
 
 
 async def create_short_term_memory() -> ShortTermMemory:
-    """Create the configured backend, falling back to memory for the demo."""
-    storage_type = os.getenv("SHORT_TERM_MEMORY_BACKEND", "memory").strip().lower()
+    """Create Redis short-term memory and fail fast when it is unavailable."""
+    storage_type = os.getenv("SHORT_TERM_MEMORY_BACKEND", "redis").strip().lower()
+    if storage_type != "redis":
+        raise ValueError(
+            f"Unsupported SHORT_TERM_MEMORY_BACKEND={storage_type!r}; "
+            "only Redis is supported"
+        )
     ttl_seconds = _positive_int_env(
         "SHORT_TERM_MEMORY_TTL",
         DEFAULT_TTL_SECONDS,
@@ -494,49 +403,34 @@ async def create_short_term_memory() -> ShortTermMemory:
         "SHORT_TERM_MEMORY_MAX_MESSAGES",
         DEFAULT_MAX_MESSAGES,
     )
-    allow_fallback = _boolean_env(
-        "SHORT_TERM_MEMORY_ALLOW_FALLBACK",
-        True,
-    )
 
-    fallback_from = None
-    if storage_type == "redis":
-        redis_failure: Optional[Exception] = None
-        try:
-            memory = ShortTermMemory(
-                storage_type="redis",
-                redis_url=os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
-                ttl_seconds=ttl_seconds,
-                max_messages=max_messages,
-            )
-            if (await memory.health())["status"] == "ok":
-                return memory
-            await memory.close()
-            redis_failure = ShortTermMemoryUnavailable(
-                "Redis health check reported a degraded status"
-            )
-        except Exception as exc:
-            redis_failure = exc
-        if not allow_fallback:
-            raise ShortTermMemoryUnavailable(
-                "Redis short-term memory is required but unavailable"
-            ) from redis_failure
-        logger.warning(
-            f"Redis unavailable; falling back to memory: {redis_failure}"
+    redis_failure: Optional[Exception] = None
+    memory: Optional[ShortTermMemory] = None
+    try:
+        memory = ShortTermMemory(
+            redis_url=os.getenv("REDIS_URL", DEFAULT_REDIS_URL),
+            ttl_seconds=ttl_seconds,
+            max_messages=max_messages,
         )
-        fallback_from = "redis"
-    elif storage_type != "memory":
-        raise ValueError(
-            f"Unsupported SHORT_TERM_MEMORY_BACKEND={storage_type!r}; "
-            "expected 'memory' or 'redis'"
+        if (await memory.health())["status"] == "ok":
+            return memory
+        redis_failure = ShortTermMemoryUnavailable(
+            "Redis health check reported a degraded status"
         )
+    except Exception as exc:
+        redis_failure = exc
+    finally:
+        if memory is not None and redis_failure is not None:
+            try:
+                await memory.close()
+            except Exception as close_error:
+                logger.warning(
+                    f"Failed to close unavailable Redis memory: {close_error}"
+                )
 
-    return ShortTermMemory(
-        storage_type="memory",
-        ttl_seconds=ttl_seconds,
-        max_messages=max_messages,
-        fallback_from=fallback_from,
-    )
+    raise ShortTermMemoryUnavailable(
+        "Redis short-term memory is required but unavailable"
+    ) from redis_failure
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -552,16 +446,3 @@ def _positive_int_env(name: str, default: int) -> int:
         logger.warning(f"{name} must be positive; using {default}")
         return default
     return value
-
-
-def _boolean_env(name: str, default: bool) -> bool:
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    normalized = raw_value.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    logger.warning(f"Invalid {name}={raw_value!r}; using {default}")
-    return default

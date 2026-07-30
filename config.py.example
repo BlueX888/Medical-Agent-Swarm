@@ -15,11 +15,9 @@ MEM0_CONFIG = {
 }
 
 # Short-term memory is configured with environment variables:
-#   SHORT_TERM_MEMORY_BACKEND=redis  # memory or redis
 #   REDIS_URL=redis://localhost:6379/0
 #   SHORT_TERM_MEMORY_TTL=86400
 #   SHORT_TERM_MEMORY_MAX_MESSAGES=40
-#   SHORT_TERM_MEMORY_ALLOW_FALLBACK=true
 
 # LangSmith observability is configured with environment variables:
 #   LANGSMITH_TRACING=true

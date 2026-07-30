@@ -7,8 +7,8 @@ from memory import ShortTermMemory, ShortTermMemoryUnavailable, create_short_ter
 
 
 @pytest.mark.asyncio
-async def test_saved_turn_is_loaded_in_conversation_order():
-    memory = ShortTermMemory(storage_type="memory")
+async def test_saved_turn_is_loaded_in_conversation_order(short_term_memory_factory):
+    memory = short_term_memory_factory()
 
     await memory.save_turn(
         session_id="session-a",
@@ -31,8 +31,10 @@ async def test_saved_turn_is_loaded_in_conversation_order():
 
 
 @pytest.mark.asyncio
-async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns():
-    memory = ShortTermMemory(storage_type="memory", max_messages=4)
+async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory(max_messages=4)
 
     for index in range(3):
         await memory.save_turn(
@@ -58,8 +60,10 @@ async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns():
 
 
 @pytest.mark.asyncio
-async def test_session_can_be_cleared_and_expires_after_inactivity():
-    memory = ShortTermMemory(storage_type="memory", ttl_seconds=1)
+async def test_session_can_be_cleared_and_expires_after_inactivity(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory(ttl_seconds=1)
     await memory.save_turn("clear-me", "问题", "回答")
 
     assert await memory.get_session_ttl("clear-me") > 0
@@ -75,18 +79,20 @@ async def test_session_can_be_cleared_and_expires_after_inactivity():
 
 
 @pytest.mark.asyncio
-async def test_health_reports_the_active_backend():
-    memory = ShortTermMemory(storage_type="memory")
+async def test_health_reports_the_active_backend(short_term_memory_factory):
+    memory = short_term_memory_factory()
 
     assert await memory.health() == {
-        "backend": "memory",
+        "backend": "redis",
         "status": "ok",
     }
 
 
 @pytest.mark.asyncio
-async def test_assistant_display_metadata_round_trips_with_the_visible_turn():
-    memory = ShortTermMemory(storage_type="memory")
+async def test_assistant_display_metadata_round_trips_with_the_visible_turn(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
     metadata = {
         "risk_level": "high",
         "suggestions": ["Seek in-person care today"],
@@ -108,8 +114,10 @@ async def test_assistant_display_metadata_round_trips_with_the_visible_turn():
 
 
 @pytest.mark.asyncio
-async def test_loaded_metadata_is_isolated_from_in_memory_storage():
-    memory = ShortTermMemory(storage_type="memory")
+async def test_loaded_metadata_is_isolated_from_adapter_storage(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
     await memory.save_turn(
         session_id="session-with-isolated-metadata",
         user_message="问题",
@@ -125,34 +133,31 @@ async def test_loaded_metadata_is_isolated_from_in_memory_storage():
 
 
 @pytest.mark.asyncio
-async def test_configured_redis_falls_back_to_memory_when_unavailable(monkeypatch):
+async def test_configured_redis_never_falls_back_when_unavailable(monkeypatch):
     monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
     monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")
     monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "true")
-
-    memory = await create_short_term_memory()
-
-    assert await memory.health() == {
-        "backend": "memory",
-        "status": "degraded",
-        "configured_backend": "redis",
-    }
-
-
-@pytest.mark.asyncio
-async def test_configured_redis_can_fail_fast_when_fallback_is_disabled(monkeypatch):
-    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redis")
-    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6399/0")
-    monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "false")
 
     with pytest.raises(ShortTermMemoryUnavailable, match="required but unavailable"):
         await create_short_term_memory()
 
 
 @pytest.mark.asyncio
-async def test_unknown_backend_configuration_fails_instead_of_falling_back(monkeypatch):
-    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "redsi")
-    monkeypatch.setenv("SHORT_TERM_MEMORY_ALLOW_FALLBACK", "true")
+async def test_memory_backend_configuration_is_rejected(monkeypatch):
+    monkeypatch.setenv("SHORT_TERM_MEMORY_BACKEND", "memory")
 
-    with pytest.raises(ValueError, match="Unsupported SHORT_TERM_MEMORY_BACKEND"):
+    with pytest.raises(ValueError, match="only Redis is supported"):
         await create_short_term_memory()
+
+
+def test_storage_type_selection_is_no_longer_supported():
+    with pytest.raises(TypeError, match="storage_type"):
+        ShortTermMemory(storage_type="memory")
+
+
+def test_memory_named_adapter_is_rejected():
+    class MemoryNamedAdapter:
+        backend_name = "memory"
+
+    with pytest.raises(ValueError, match="must use the Redis backend"):
+        ShortTermMemory(adapter=MemoryNamedAdapter())

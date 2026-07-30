@@ -131,7 +131,7 @@ async def main():
 asyncio.run(main())
 ```
 
-可以通过相同的 `session_id` 保留会话上下文。默认使用进程内存；启用 Redis 后，应用重启或启动多个进程仍能共享最近的对话。
+可以通过相同的 `session_id` 保留会话上下文。短期记忆仅使用 Redis，因此应用重启或启动多个进程时仍能共享最近的对话。
 
 ## Redis 短期记忆
 
@@ -146,17 +146,12 @@ docker compose up -d redis
 然后设置环境变量。也可以把这些值写入项目根目录的 `.env`：
 
 ```env
-SHORT_TERM_MEMORY_BACKEND=redis
 REDIS_URL=redis://localhost:6379/0
 SHORT_TERM_MEMORY_TTL=86400
 SHORT_TERM_MEMORY_MAX_MESSAGES=40
-SHORT_TERM_MEMORY_ALLOW_FALLBACK=true
 ```
 
-启动时 Redis 不可用，默认会记录警告并回退到进程内存，健康状态为
-`degraded`。生产或多进程部署建议设置
-`SHORT_TERM_MEMORY_ALLOW_FALLBACK=false`，让 Redis 不可用时启动失败，避免各
-worker 落入互不共享的内存孤岛。查看实际使用的后端：
+启动时 Redis 不可用会直接失败，不会回退到进程内存。查看 Redis 健康状态：
 
 ```text
 GET /api/health

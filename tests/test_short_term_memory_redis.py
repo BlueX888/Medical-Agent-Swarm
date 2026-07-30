@@ -19,13 +19,11 @@ REDIS_TEST_URL = os.getenv("REDIS_TEST_URL")
 async def test_redis_backend_persists_trims_refreshes_and_clears():
     session_id = f"integration-{uuid.uuid4()}"
     memory = ShortTermMemory(
-        storage_type="redis",
         redis_url=REDIS_TEST_URL,
         ttl_seconds=60,
         max_messages=4,
     )
     second_process_memory = ShortTermMemory(
-        storage_type="redis",
         redis_url=REDIS_TEST_URL,
         ttl_seconds=60,
         max_messages=4,

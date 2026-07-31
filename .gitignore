@@ -81,3 +81,6 @@ perf_slo_*.json
 SYSTEM_REPORT.md
 SYSTEM_ARCHITECTURE_REPORT.md
 docs/
+!docs/
+docs/*
+!docs/langsmith-from-zero-to-deep.md

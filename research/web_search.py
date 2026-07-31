@@ -36,6 +36,21 @@ class SearchResult:
     source: str = "web"  # 来源标识
 
 
+class SearchResults(list):
+    """List-compatible search result collection carrying retry telemetry."""
+
+    def __init__(
+        self,
+        values: Optional[Iterable[SearchResult]] = None,
+        *,
+        retry_count: int = 0,
+        retry_exhausted: bool = False,
+    ):
+        super().__init__(values or [])
+        self.retry_count = max(0, int(retry_count))
+        self.retry_exhausted = bool(retry_exhausted)
+
+
 class WebSearchTool:
     """
     网络搜索工具
@@ -183,7 +198,7 @@ class WebSearchTool:
         """
         if not DDGS_AVAILABLE:
             logger.error("DDGS not available, cannot perform web search")
-            return []
+            return SearchResults()
 
         max_results = max(1, max_results)
         query_candidates = self._build_query_candidates(query)
@@ -193,11 +208,13 @@ class WebSearchTool:
         attempt_limit = min(len(search_plan), max(retry_count + 1, 6))
         last_error: Optional[Exception] = None
         collected_results: List[SearchResult] = []
+        attempts_made = 0
 
         for attempt, (candidate_query, candidate_region, backend) in enumerate(
             search_plan[:attempt_limit],
             start=1
         ):
+            attempts_made = attempt
             try:
                 logger.info(
                     "Web searching "
@@ -246,7 +263,10 @@ class WebSearchTool:
                             f"Found {len(preferred_results)} results for: {query} "
                             f"(matched candidate: {candidate_query}, authoritative={authoritative_count})"
                         )
-                        return preferred_results
+                        return SearchResults(
+                            preferred_results,
+                            retry_count=attempt - 1,
+                        )
 
                     logger.debug(
                         f"Collected {len(collected_results)} candidate results for {query}; "
@@ -272,9 +292,16 @@ class WebSearchTool:
         if collected_results:
             preferred_results = self._prefer_authoritative_results(collected_results)[:max_results]
             logger.info(f"Returning {len(preferred_results)} fallback results for: {query}")
-            return preferred_results
+            return SearchResults(
+                preferred_results,
+                retry_count=max(0, attempts_made - 1),
+                retry_exhausted=attempts_made >= attempt_limit,
+            )
 
-        return []
+        return SearchResults(
+            retry_count=max(0, attempts_made - 1),
+            retry_exhausted=attempts_made >= attempt_limit,
+        )
 
     def _ddgs_text(
         self,

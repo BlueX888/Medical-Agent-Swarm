@@ -4,9 +4,11 @@ Agent循环引擎
 消费由工作流注入的会话历史
 支持约束验证（Harness Engineering）
 """
+import asyncio
 import uuid
 import json
 import inspect
+from collections import Counter
 from typing import Dict, Any, List, Optional, Set
 from loguru import logger
 
@@ -16,6 +18,7 @@ from .observability import (
     classify_tool_result,
     summarize_tool_input,
     summarize_tool_trace_output,
+    log_observability_event,
     trace_async,
 )
 
@@ -41,7 +44,13 @@ class AgentLoop:
     - 不直接读写持久化记忆
     """
 
-    def __init__(self, max_iterations: int = 10, max_tool_calls: int = 4):
+    def __init__(
+        self,
+        max_iterations: int = 10,
+        max_tool_calls: int = 4,
+        max_llm_retries: int = 2,
+        max_tool_retries: int = 2,
+    ):
         """
         初始化Agent循环引擎
 
@@ -51,6 +60,8 @@ class AgentLoop:
         """
         self.max_iterations = max_iterations
         self.max_tool_calls = max_tool_calls
+        self.max_llm_retries = max(0, max_llm_retries)
+        self.max_tool_retries = max(0, max_tool_retries)
         self.tool_call_count = 0
 
         # Harness Engineering: runtime behavior constraint validator
@@ -142,6 +153,9 @@ class AgentLoop:
                 "iterations": result.get("iterations", 0),
                 "tool_call_count": self.tool_call_count,
                 "answer_length": len(result.get("answer", "") or ""),
+                "agent.retry_count": result.get("agent.retry_count", 0),
+                "agent.exception_count": result.get("agent.exception_count", 0),
+                "agent.exception_types": result.get("agent.exception_types", {}),
             },
         )
 
@@ -189,6 +203,8 @@ class AgentLoop:
             # 初始化消息历史（包含历史对话）
             messages = self._initialize_messages(agent, loop_input_data, session_id)
             latest_risk_level = ""
+            agent_retry_count = 0
+            agent_exception_types: Counter[str] = Counter()
             if debug_collector:
                 role_counts: Dict[str, int] = {}
                 for message in messages:
@@ -252,16 +268,30 @@ class AgentLoop:
 
                 try:
                     # 调用 LLM（可能返回 tool_calls）
-                    llm_response: LLMResponse = await agent.llm_client.chat_with_tools(
-                        messages=messages,
-                        tools=tools_openai_format,
-                        tool_choice="auto",
-                        temperature=agent.config.get('temperature', 0.7),
-                        debug_collector=debug_collector,
-                        trace_name=f"{agent.agent_id}.iteration",
-                        agent_id=agent.agent_id,
-                        iteration=state.iteration,
+                    llm_kwargs = {
+                        "messages": messages,
+                        "tools": tools_openai_format,
+                        "tool_choice": "auto",
+                        "temperature": agent.config.get('temperature', 0.7),
+                        "debug_collector": debug_collector,
+                        "trace_name": f"{agent.agent_id}.iteration",
+                        "agent_id": agent.agent_id,
+                        "iteration": state.iteration,
+                    }
+                    retry_method = getattr(
+                        agent.llm_client,
+                        "chat_with_tools_retry",
+                        None,
                     )
+                    if callable(retry_method):
+                        llm_response = await retry_method(
+                            max_retries=self.max_llm_retries,
+                            **llm_kwargs,
+                        )
+                    else:
+                        llm_response = await agent.llm_client.chat_with_tools(
+                            **llm_kwargs,
+                        )
 
                     # 记录中间结果
                     state.add_intermediate_result({
@@ -275,6 +305,19 @@ class AgentLoop:
                             'finish_reason': llm_response.finish_reason
                         }
                     })
+                    await self._trace_intermediate_state(
+                        agent=agent,
+                        session_id=session_id,
+                        debug_collector=debug_collector,
+                        iteration=state.iteration,
+                        stage="after_llm",
+                        snapshot={
+                            "iteration": state.iteration,
+                            "messages": messages,
+                            "intermediate_results": state.intermediate_results,
+                            "llm_response": state.intermediate_results[-1],
+                        },
+                    )
 
                     # 情况1: LLM 返回 tool_calls，执行 Skills
                     if llm_response.has_tool_calls():
@@ -326,6 +369,20 @@ class AgentLoop:
                                     result=tool_result
                                 )
                             )
+                            await self._trace_intermediate_state(
+                                agent=agent,
+                                session_id=session_id,
+                                debug_collector=debug_collector,
+                                iteration=state.iteration,
+                                stage="after_tool",
+                                snapshot={
+                                    "iteration": state.iteration,
+                                    "tool_name": tool_call.name,
+                                    "tool_result": tool_result,
+                                    "messages": messages,
+                                    "intermediate_results": state.intermediate_results,
+                                },
+                            )
 
                         # 继续下一轮循环
                         continue
@@ -355,9 +412,11 @@ class AgentLoop:
 
                 except Exception as e:
                     logger.error(f"Error in iteration {state.iteration}: {e}")
+                    agent_exception_types[type(e).__name__] += 1
                     if state.iteration >= state.max_iterations:
                         state.mark_failed(str(e))
                         break
+                    agent_retry_count += 1
                     # 否则继续尝试
 
             # 如果达到最大迭代次数但没有完成
@@ -375,15 +434,29 @@ class AgentLoop:
                     })
 
                     # 调用 LLM（禁用 function calling）
-                    final_response = await agent.llm_client.chat_with_tools(
-                        messages=messages,
-                        tools=None,
-                        temperature=0.7,
-                        debug_collector=debug_collector,
-                        trace_name=f"{agent.agent_id}.forced_final",
-                        agent_id=agent.agent_id,
-                        iteration=state.iteration,
+                    final_kwargs = {
+                        "messages": messages,
+                        "tools": None,
+                        "temperature": 0.7,
+                        "debug_collector": debug_collector,
+                        "trace_name": f"{agent.agent_id}.forced_final",
+                        "agent_id": agent.agent_id,
+                        "iteration": state.iteration,
+                    }
+                    retry_method = getattr(
+                        agent.llm_client,
+                        "chat_with_tools_retry",
+                        None,
                     )
+                    if callable(retry_method):
+                        final_response = await retry_method(
+                            max_retries=self.max_llm_retries,
+                            **final_kwargs,
+                        )
+                    else:
+                        final_response = await agent.llm_client.chat_with_tools(
+                            **final_kwargs,
+                        )
 
                     final_answer = final_response.content or '抱歉，未能完成任务'
 
@@ -401,6 +474,7 @@ class AgentLoop:
 
                 except Exception as e:
                     logger.error(f"Failed to generate fallback answer: {e}")
+                    agent_exception_types[type(e).__name__] += 1
                     # 降级到简单提取
                     result = {
                         'answer': '抱歉，系统在处理您的问题时遇到了问题。建议您简化问题或稍后重试。',
@@ -419,6 +493,28 @@ class AgentLoop:
 
             logger.info(f"Agent Loop finished: status={state.status.value}, iterations={state.iteration}")
             final_result = state.final_result or {}
+            final_result.setdefault("agent.retry_count", agent_retry_count)
+            final_result.setdefault(
+                "agent.exception_count",
+                sum(agent_exception_types.values()),
+            )
+            final_result.setdefault(
+                "agent.exception_types",
+                dict(agent_exception_types),
+            )
+            await self._trace_intermediate_state(
+                agent=agent,
+                session_id=session_id,
+                debug_collector=debug_collector,
+                iteration=state.iteration,
+                stage="final_output",
+                snapshot={
+                    "iteration": state.iteration,
+                    "final_output": final_result,
+                    "messages": messages,
+                    "intermediate_results": state.intermediate_results,
+                },
+            )
             if agent_timer:
                 agent_timer.finish(
                     output=final_result,
@@ -433,6 +529,54 @@ class AgentLoop:
             if agent_timer:
                 agent_timer.finish(status="failed", error=str(e), output={"error": str(e)})
             raise
+
+    async def _trace_intermediate_state(
+        self,
+        *,
+        agent: Any,
+        session_id: Optional[str],
+        debug_collector: Any,
+        iteration: int,
+        stage: str,
+        snapshot: Dict[str, Any],
+    ) -> None:
+        """Persist an explicit chain span for each meaningful agent state change."""
+        async def return_snapshot() -> Dict[str, Any]:
+            return snapshot
+
+        await trace_async(
+            name=f"state.{agent.agent_id}.{stage}.{iteration}",
+            run_type="chain",
+            func=return_snapshot,
+            inputs={
+                "agent_id": agent.agent_id,
+                "iteration": iteration,
+                "stage": stage,
+                "message_count": len(snapshot.get("messages") or []),
+                "intermediate_count": len(
+                    snapshot.get("intermediate_results") or []
+                ),
+            },
+            metadata={
+                "run_id": getattr(debug_collector, "run_id", None),
+                "session_id": session_id,
+                "agent_id": agent.agent_id,
+                "agent.iteration": iteration,
+                "agent.state_stage": stage,
+                "status": "success",
+            },
+            tags=["medical-agent-swarm", "agent-state", stage],
+            output_mapper=lambda value: {
+                "status": "success",
+                "state_stage": stage,
+                "iteration": iteration,
+                "message_count": len(value.get("messages") or []),
+                "intermediate_count": len(
+                    value.get("intermediate_results") or []
+                ),
+                "state": value,
+            },
+        )
 
     async def _execute_tool_request(
         self,
@@ -456,6 +600,8 @@ class AgentLoop:
             "allowed": None,
             "validation_passed": None,
             "outcome": None,
+            "retry_count": 0,
+            "retry_exhausted": False,
         }
 
         async def execute_path() -> Any:
@@ -559,26 +705,58 @@ class AgentLoop:
                         "tool_call_index": self.tool_call_count,
                     },
                 )
-            try:
-                result = await agent.execute_tool(
-                    tool_name=tool_call.name,
-                    arguments=tool_call.arguments,
-                )
-            except Exception as tool_error:
-                trace_state["outcome"] = (
-                    "timeout"
-                    if isinstance(tool_error, TimeoutError)
-                    else "error"
-                )
-                if skill_timer:
-                    skill_timer.finish(
-                        output={"error": str(tool_error)},
-                        status="failed",
-                        error=str(tool_error),
+            result = None
+            for attempt in range(self.max_tool_retries + 1):
+                trace_state["retry_count"] = attempt
+                try:
+                    result = await agent.execute_tool(
+                        tool_name=tool_call.name,
+                        arguments=tool_call.arguments,
                     )
-                raise
+                    break
+                except Exception as tool_error:
+                    trace_state["outcome"] = (
+                        "timeout"
+                        if isinstance(tool_error, TimeoutError)
+                        else "error"
+                    )
+                    if attempt >= self.max_tool_retries:
+                        trace_state["retry_exhausted"] = attempt > 0
+                        metadata["tool.retry_count"] = attempt
+                        metadata["tool.retry_exhausted"] = attempt > 0
+                        if skill_timer:
+                            skill_timer.finish(
+                                output={"error": str(tool_error)},
+                                status="failed",
+                                error=str(tool_error),
+                                metadata={
+                                    "retry_count": attempt,
+                                    "retry_exhausted": True,
+                                    "error_type": type(tool_error).__name__,
+                                },
+                            )
+                        raise
+                    log_observability_event(
+                        "tool.retry",
+                        name=f"tool.{trace_tool_name}",
+                        run_type="tool",
+                        run_id=getattr(debug_collector, "run_id", None),
+                        retry_count=attempt + 1,
+                        error_type=type(tool_error).__name__,
+                        **{"tool.name": trace_tool_name},
+                    )
+                    await asyncio.sleep(min(2 ** attempt, 4))
 
             trace_state["outcome"] = classify_tool_result(result)
+            result_retry_count = getattr(result, "retry_count", None)
+            if isinstance(result_retry_count, int):
+                trace_state["retry_count"] = max(
+                    trace_state.get("retry_count", 0),
+                    result_retry_count,
+                )
+            trace_state["retry_exhausted"] = bool(
+                getattr(result, "retry_exhausted", False)
+            )
             if skill_timer:
                 result_error = (
                     result.get("error")
@@ -590,6 +768,10 @@ class AgentLoop:
                     output=result,
                     status="failed" if failed else "success",
                     error=str(result_error) if result_error else None,
+                    metadata={
+                        "retry_count": trace_state.get("retry_count", 0),
+                        "retry_exhausted": trace_state.get("retry_exhausted", False),
+                    },
                 )
             return result
 
@@ -623,6 +805,8 @@ class AgentLoop:
                 ),
                 "tool.allowed": trace_state["allowed"],
                 "tool.validation_passed": trace_state["validation_passed"],
+                "tool.retry_count": trace_state.get("retry_count", 0),
+                "tool.retry_exhausted": trace_state.get("retry_exhausted", False),
             },
         )
 

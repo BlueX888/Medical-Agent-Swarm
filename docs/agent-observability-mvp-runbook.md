@@ -15,6 +15,7 @@ LANGSMITH_TRACING=true
 LANGSMITH_API_KEY=lsv2_...
 LANGSMITH_PROJECT=medical-agent-swarm
 LANGSMITH_REDACT_MEDICAL_TEXT=true
+LLM_STREAMING=true
 OBSERVABILITY_ENVIRONMENT=staging
 OBSERVABILITY_ENTRYPOINT=api
 OBSERVABILITY_HASH_KEY=<random-secret>
@@ -80,4 +81,27 @@ python -m pytest -m "not integration" -q
 LANGSMITH_TRACING=false
 ```
 
-关闭后 `trace_async()` 是 no-op，业务函数的调用次数、返回值和异常传播保持不变。
+## 补齐后的统一指标
+
+当前实现还会为每次 Agent 迭代写入 `state.<agent>.<stage>.<iteration>` 链路，阶段包括
+`after_llm`、`after_tool` 和 `final_output`；Graph 节点 Span 同时保存输入状态快照和节点输出摘要。
+
+LLM Span 记录：
+
+- `llm.ttft_ms`：流式响应收到第一个内容或工具增量的毫秒数；
+- `llm.duration_ms` / `duration_ms`：本次模型调用耗时；
+- `llm.streaming`、`llm.stream_fallback`：是否流式及是否回退到非流式；
+- `llm.retry_count`、`llm.retry_reason`、`llm.attempt_index`；
+- `llm.input_tokens`、`llm.output_tokens`、`llm.total_tokens`。
+
+Root `medical_swarm_request` 会聚合 `llm_ttft_ms_avg/min/max`、LLM/Tool 总耗时与平均耗时、
+`retry_count`、`retry_success_count`、`retry_exhausted_count`、`exception_count` 及异常类型分布；
+`exception_total_count` / `exception_types_all` 还会包含 Agent 捕获的循环异常，避免把同一个底层异常重复算入基础 Span 计数。
+Agent 自身捕获的循环重试和异常另有 `agent_retry_count`、`agent_exception_count`、
+`agent_exception_types` 字段，避免和底层 LLM/Tool Span 重复计数。
+
+每个 Span 同时输出结构化 Loguru 事件 `span.started`、`span.completed` 或 `span.failed`，
+字段包含 `observability.event`、`span.name`、`run_type`、`run_id`、`status`、`duration_ms`、
+重试信息和标准化 `error.type`/`error.code`，便于没有 LangSmith 时仍能检索本地日志。
+
+关闭后 `trace_async()` 不会创建 LangSmith Span，但仍写结构化本地日志并保留业务函数的调用次数、返回值和异常传播行为。

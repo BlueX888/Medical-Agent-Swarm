@@ -92,23 +92,24 @@ def test_nested_spans_roll_up_into_one_root_summary(monkeypatch):
     assert len(run_ids) == 1
     assert len(session_refs) == 1
     assert "private-session" not in repr(captured)
-    assert roots[0]["output"] == {
-        "status": "success",
-        "route": "swarm",
-        "answer_length": len("private final"),
-        "agent_count": 2,
-        "llm_call_count": 2,
-        "input_tokens": 10,
-        "output_tokens": 4,
-        "total_tokens": 14,
-        "tool_call_count": 2,
-        "tool_success_count": 2,
-        "tool_blocked": 0,
-        "tool_failed": 0,
-        "safety_checked": True,
-        "safety_passed": True,
-        "safety_error": False,
-    }
+    root_output = roots[0]["output"]
+    assert root_output["status"] == "success"
+    assert root_output["route"] == "swarm"
+    assert root_output["answer_length"] == len("private final")
+    assert root_output["agent_count"] == 2
+    assert root_output["llm_call_count"] == 2
+    assert root_output["input_tokens"] == 10
+    assert root_output["output_tokens"] == 4
+    assert root_output["total_tokens"] == 14
+    assert root_output["tool_call_count"] == 2
+    assert root_output["tool_success_count"] == 2
+    assert root_output["tool_blocked"] == 0
+    assert root_output["tool_failed"] == 0
+    assert root_output["retry_count"] == 0
+    assert root_output["exception_count"] == 0
+    assert root_output["safety_checked"] is True
+    assert root_output["safety_passed"] is True
+    assert root_output["safety_error"] is False
     assert "private" not in repr(captured)
 
 

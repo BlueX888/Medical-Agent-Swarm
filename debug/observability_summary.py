@@ -24,6 +24,13 @@ def summarize_debug_run(
     safety_events = [event for event in event_list if event.stage == "safety_check"]
 
     token_totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    llm_ttft_values = []
+    llm_duration_total = 0.0
+    tool_duration_total = 0.0
+    retry_count = 0
+    retry_success_count = 0
+    retry_exhausted_count = 0
+    exception_types: Dict[str, int] = {}
     for event in llm_events:
         usage = _usage_from_event(event)
         token_totals["input_tokens"] += _integer(
@@ -39,6 +46,37 @@ def summarize_debug_run(
             else _integer(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
             + _integer(usage.get("output_tokens", usage.get("completion_tokens", 0)))
         )
+        metadata = event.metadata if isinstance(event.metadata, Mapping) else {}
+        ttft_ms = metadata.get("ttft_ms")
+        if isinstance(ttft_ms, (int, float)):
+            llm_ttft_values.append(float(ttft_ms))
+        if isinstance(event.duration_ms, (int, float)):
+            llm_duration_total += float(event.duration_ms)
+        retry = _integer(metadata.get("retry_count"))
+        if retry > 0:
+            retry_count += 1
+            if metadata.get("retry_exhausted") or event.status in {"failed", "timeout"}:
+                retry_exhausted_count += 1
+            else:
+                retry_success_count += 1
+
+    for event in tool_events:
+        if isinstance(event.duration_ms, (int, float)):
+            tool_duration_total += float(event.duration_ms)
+        metadata = event.metadata if isinstance(event.metadata, Mapping) else {}
+        retry = _integer(metadata.get("retry_count"))
+        if retry > 0:
+            retry_count += 1
+            if event.status in {"failed", "timeout"}:
+                retry_exhausted_count += 1
+            else:
+                retry_success_count += 1
+
+    for event in event_list:
+        if event.status in {"failed", "timeout"} and event.error:
+            metadata = event.metadata if isinstance(event.metadata, Mapping) else {}
+            error_type = str(metadata.get("error_type") or "unknown")
+            exception_types[error_type] = exception_types.get(error_type, 0) + 1
 
     safety_checked = False
     safety_passed = False
@@ -70,6 +108,25 @@ def summarize_debug_run(
         "tool_success_count": executed_success,
         "tool_failed": executed_failed,
         "tool_blocked": len(blocked_events),
+        "tool_duration_ms_total": round(tool_duration_total, 3),
+        "tool_duration_ms_avg": round(tool_duration_total / len(tool_events), 3)
+        if tool_events
+        else 0.0,
+        "llm_duration_ms_total": round(llm_duration_total, 3),
+        "llm_duration_ms_avg": round(llm_duration_total / len(llm_events), 3)
+        if llm_events
+        else 0.0,
+        "llm_ttft_ms_count": len(llm_ttft_values),
+        "llm_ttft_ms_avg": round(sum(llm_ttft_values) / len(llm_ttft_values), 3)
+        if llm_ttft_values
+        else None,
+        "llm_ttft_ms_min": min(llm_ttft_values) if llm_ttft_values else None,
+        "llm_ttft_ms_max": max(llm_ttft_values) if llm_ttft_values else None,
+        "retry_count": retry_count,
+        "retry_success_count": retry_success_count,
+        "retry_exhausted_count": retry_exhausted_count,
+        "exception_count": sum(exception_types.values()),
+        "exception_types": exception_types,
         "safety_checked": safety_checked,
         "safety_passed": safety_passed,
         "safety_error": safety_error,

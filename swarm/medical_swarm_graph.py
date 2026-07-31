@@ -781,6 +781,7 @@ class MedicalSwarmGraph:
                 run_type="chain",
                 func=execute_node,
                 inputs={
+                    "state": self._debug_state_snapshot(state),
                     "state_keys": sorted(
                         key for key in state if key != "debug_collector"
                     ),
@@ -806,6 +807,7 @@ class MedicalSwarmGraph:
                     "output_keys": sorted(output.keys())
                     if isinstance(output, dict)
                     else [],
+                    "node_output": output,
                 },
             )
 
@@ -1168,6 +1170,31 @@ class MedicalSwarmGraph:
                 "safety_passed": safety_result["safety_passed"],
                 "safety_issues": safety_result["safety_issues"],
             }
+        )
+        async def return_final_output() -> Dict[str, Any]:
+            return dict(result)
+
+        await trace_async(
+            name="output.final",
+            run_type="chain",
+            func=return_final_output,
+            inputs={
+                "answer_length": len(result.get("answer", "") or ""),
+                "route": state.get("route") or state.get("mode") or "unknown",
+                "safety_checked": bool(result.get("safety_checked")),
+            },
+            metadata={
+                "run_id": getattr(collector, "run_id", None),
+                "session_id": state.get("session_id"),
+                "route": state.get("route") or state.get("mode"),
+                "status": "success",
+            },
+            tags=["medical-agent-swarm", "output"],
+            output_mapper=lambda value: {
+                "status": "success",
+                "final_output": value,
+                "answer_length": len(value.get("answer", "") or ""),
+            },
         )
         return result
 

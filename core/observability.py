@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 import uuid
 from contextvars import ContextVar, Token
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Optional
@@ -79,6 +80,41 @@ _run_metrics: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
 
 class _SafeTraceFailure(RuntimeError):
     """Internal sentinel that marks a remote span failed without PHI."""
+
+
+def log_observability_event(
+    event: str,
+    *,
+    name: str,
+    run_type: str,
+    run_id: Optional[str] = None,
+    status: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+    retry_count: Optional[int] = None,
+    error_type: Optional[str] = None,
+    error_code: Optional[str] = None,
+    **fields: Any,
+) -> None:
+    """Emit one structured, correlation-friendly observability log event."""
+    payload: Dict[str, Any] = {
+        "observability.event": event,
+        "span.name": name,
+        "run_type": run_type,
+    }
+    optional = {
+        "run_id": run_id,
+        "status": status,
+        "duration_ms": duration_ms,
+        "retry_count": retry_count,
+        "error.type": error_type,
+        "error.code": error_code,
+    }
+    payload.update({key: value for key, value in optional.items() if value is not None})
+    payload.update({key: value for key, value in fields.items() if value is not None})
+    safe_payload = sanitize_for_langsmith(payload)
+    level = "warning" if event.endswith("failed") or event.endswith("error") else "info"
+    bound = logger.bind(**safe_payload)
+    getattr(bound, level)("observability.{}", event)
 
 
 def session_reference(session_id: Optional[str]) -> Optional[str]:
@@ -333,14 +369,175 @@ async def trace_async(
     output_mapper: Optional[Callable[[Any], Any]] = None,
 ) -> Any:
     """Run an async callable inside a LangSmith span when tracing is enabled."""
+    span_started = time.perf_counter()
+    supplied_metadata = dict(metadata or {})
+    metadata_source = metadata if isinstance(metadata, dict) else None
+
+    async def _run_untraced() -> Any:
+        log_observability_event(
+            "span.started",
+            name=name,
+            run_type=run_type,
+            run_id=supplied_metadata.get("run_id"),
+            retry_count=supplied_metadata.get(
+                "llm.retry_count", supplied_metadata.get("tool.retry_count")
+            ),
+        )
+        try:
+            result = await func()
+        except Exception as error:
+            normalized = normalize_error(error)
+            if name == "medical_swarm_request":
+                metrics = _run_metrics.get()
+                if metrics is not None:
+                    metrics["exception_count"] += 1
+                    error_type = normalized["error.type"]
+                    metrics["exception_types"][error_type] = (
+                        metrics["exception_types"].get(error_type, 0) + 1
+                    )
+            else:
+                duration_ms = round(
+                    (time.perf_counter() - span_started) * 1000,
+                    3,
+                )
+                _record_span_metrics(
+                    name,
+                    run_type,
+                    supplied_metadata,
+                    {"status": "failed", "duration_ms": duration_ms, **normalized},
+                )
+            log_observability_event(
+                "span.failed",
+                name=name,
+                run_type=run_type,
+                run_id=supplied_metadata.get("run_id"),
+                status=(
+                    "timeout"
+                    if normalized["error.code"] == "timeout"
+                    else "failed"
+                ),
+                duration_ms=round(
+                    (time.perf_counter() - span_started) * 1000,
+                    3,
+                ),
+                retry_count=supplied_metadata.get(
+                    "llm.retry_count", supplied_metadata.get("tool.retry_count")
+                ),
+                error_type=normalized["error.type"],
+                error_code=normalized["error.code"],
+            )
+            raise
+        try:
+            mapped = output_mapper(result) if output_mapper else result
+        except Exception as mapper_error:
+            mapped = {
+                "status": "degraded",
+                **normalize_error(mapper_error),
+            }
+        if isinstance(mapped, Mapping):
+            mapped = dict(mapped)
+            mapped.setdefault(
+                "duration_ms",
+                round((time.perf_counter() - span_started) * 1000, 3),
+            )
+        mapped_values = mapped if isinstance(mapped, Mapping) else {}
+        if name == "medical_swarm_request":
+            mapped = _augment_root_summary(mapped)
+            mapped_values = mapped
+        else:
+            _record_span_metrics(name, run_type, supplied_metadata, mapped)
+        summary_fields = (
+            {
+                key: mapped_values.get(key)
+                for key in (
+                    "agent_count",
+                    "llm_call_count",
+                    "input_tokens",
+                    "output_tokens",
+                    "total_tokens",
+                    "tool_call_count",
+                    "tool_duration_ms_total",
+                    "tool_duration_ms_avg",
+                    "llm_duration_ms_total",
+                    "llm_duration_ms_avg",
+                    "llm_ttft_ms_count",
+                    "llm_ttft_ms_avg",
+                    "llm_ttft_ms_min",
+                    "llm_ttft_ms_max",
+                    "retry_success_count",
+                    "retry_exhausted_count",
+                    "exception_count",
+                    "exception_total_count",
+                    "exception_types",
+                    "exception_types_all",
+                )
+                if key in mapped_values
+            }
+            if name == "medical_swarm_request"
+            else {}
+        )
+        mapped_status = mapped_values.get("status")
+        if mapped_status in {"failed", "timeout"}:
+            log_observability_event(
+                "span.failed",
+                name=name,
+                run_type=run_type,
+                run_id=supplied_metadata.get("run_id"),
+                status=mapped_status,
+                duration_ms=round((time.perf_counter() - span_started) * 1000, 3),
+                retry_count=(
+                    mapped_values.get("retry_count")
+                    if name == "medical_swarm_request"
+                    else supplied_metadata.get(
+                        "llm.retry_count", supplied_metadata.get("tool.retry_count")
+                    )
+                ),
+                error_type=mapped_values.get("error.type"),
+                error_code=mapped_values.get("error.code"),
+                **summary_fields,
+            )
+            return result
+        log_observability_event(
+            "span.completed",
+            name=name,
+            run_type=run_type,
+            run_id=supplied_metadata.get("run_id"),
+            status=mapped_values.get("status") or "success",
+            duration_ms=round((time.perf_counter() - span_started) * 1000, 3),
+            retry_count=(
+                mapped_values.get("retry_count")
+                if name == "medical_swarm_request"
+                else supplied_metadata.get(
+                    "llm.retry_count", supplied_metadata.get("tool.retry_count")
+                )
+            ),
+            **summary_fields,
+        )
+        return result
+
+    async def _run_untraced_with_metrics() -> Any:
+        metrics_token: Optional[Token] = None
+        active_metrics = _run_metrics.get()
+        if name == "medical_swarm_request" and _run_metrics.get() is None:
+            supplied_metadata.setdefault("run_id", str(uuid.uuid4()))
+            metrics_token = _run_metrics.set(
+                _new_run_metrics(supplied_metadata)
+            )
+        elif active_metrics is not None:
+            supplied_metadata.setdefault("run_id", active_metrics.get("run_id"))
+        try:
+            return await _run_untraced()
+        finally:
+            if metrics_token is not None:
+                _run_metrics.reset(metrics_token)
+
     if not langsmith_enabled():
-        return await func()
+        return await _run_untraced_with_metrics()
 
     traceable = _load_traceable()
     if traceable is None:
-        return await func()
+        return await _run_untraced_with_metrics()
 
-    supplied_metadata = dict(metadata or {})
     active_metrics = _run_metrics.get()
     if name == "medical_swarm_request":
         supplied_metadata.setdefault("run_id", str(uuid.uuid4()))
@@ -366,6 +563,21 @@ async def trace_async(
         extra=supplied_metadata,
     )
     safe_metadata = sanitize_for_langsmith(common_metadata)
+    log_observability_event(
+        "span.started",
+        name=name,
+        run_type=run_type,
+        run_id=common_metadata.get("run_id"),
+        retry_count=safe_metadata.get(
+            "llm.retry_count", safe_metadata.get("tool.retry_count")
+        ),
+        **{
+            "deployment.environment": safe_metadata.get(
+                "deployment.environment"
+            ),
+            "app.version": safe_metadata.get("app.version"),
+        },
+    )
     result_box: Dict[str, Any] = {}
     metrics_token: Optional[Token] = None
     if name == "medical_swarm_request" and _run_metrics.get() is None:
@@ -375,6 +587,7 @@ async def trace_async(
         try:
             result = await func()
             result_box["value"] = result
+            duration_ms = round((time.perf_counter() - span_started) * 1000, 3)
             try:
                 mapped = output_mapper(result) if output_mapper else result
             except Exception as mapper_error:
@@ -383,6 +596,9 @@ async def trace_async(
                     "status": "degraded",
                     **normalize_error(mapper_error),
                 }
+            if isinstance(mapped, Mapping):
+                mapped = dict(mapped)
+                mapped.setdefault("duration_ms", duration_ms)
             if name == "medical_swarm_request":
                 mapped = _augment_root_summary(mapped)
             else:
@@ -394,9 +610,37 @@ async def trace_async(
                 else None
             )
             if mapped_status in {"failed", "timeout"}:
+                log_observability_event(
+                    "span.failed",
+                    name=name,
+                    run_type=run_type,
+                    run_id=safe_metadata.get("run_id"),
+                    status=mapped_status,
+                    duration_ms=duration_ms,
+                    retry_count=safe_metadata.get(
+                        "llm.retry_count", safe_metadata.get("tool.retry_count")
+                    ),
+                    error_type=mapped.get("error.type")
+                    if isinstance(mapped, Mapping)
+                    else None,
+                    error_code=mapped.get("error.code")
+                    if isinstance(mapped, Mapping)
+                    else None,
+                )
                 raise _SafeTraceFailure(
                     f"observability outcome: {mapped_status}"
                 )
+            log_observability_event(
+                "span.completed",
+                name=name,
+                run_type=run_type,
+                run_id=safe_metadata.get("run_id"),
+                status=(mapped.get("status") if isinstance(mapped, Mapping) else "success"),
+                duration_ms=duration_ms,
+                retry_count=safe_metadata.get(
+                    "llm.retry_count", safe_metadata.get("tool.retry_count")
+                ),
+            )
             return sanitize_for_langsmith(mapped)
         except Exception as error:
             if isinstance(error, _SafeTraceFailure):
@@ -411,11 +655,22 @@ async def trace_async(
             mapped_error = {
                 "status": failure_status,
                 **normalized_error,
+                "duration_ms": round(
+                    (time.perf_counter() - span_started) * 1000,
+                    3,
+                ),
             }
             if run_type == "tool":
                 mapped_error["tool.outcome"] = (
                     "timeout" if failure_status == "timeout" else "error"
                 )
+                if metadata_source:
+                    if "tool.retry_count" in metadata_source:
+                        mapped_error["tool.retry_count"] = _safe_integer(
+                            metadata_source["tool.retry_count"]
+                        )
+                    if metadata_source.get("tool.retry_exhausted"):
+                        mapped_error["tool.retry_exhausted"] = True
             elif run_type == "llm":
                 mapped_error["llm.outcome"] = (
                     "timeout" if failure_status == "timeout" else "error"
@@ -428,8 +683,30 @@ async def trace_async(
                         "safety.outcome": "error",
                     }
                 )
-            if name != "medical_swarm_request":
+            if name == "medical_swarm_request":
+                metrics = _run_metrics.get()
+                if metrics is not None:
+                    metrics["exception_count"] += 1
+                    error_type = normalized_error["error.type"]
+                    metrics["exception_types"][error_type] = (
+                        metrics["exception_types"].get(error_type, 0) + 1
+                    )
+                mapped_error = _augment_root_summary(mapped_error)
+            else:
                 _record_span_metrics(name, run_type, safe_metadata, mapped_error)
+            log_observability_event(
+                "span.failed",
+                name=name,
+                run_type=run_type,
+                run_id=safe_metadata.get("run_id"),
+                status=failure_status,
+                duration_ms=mapped_error["duration_ms"],
+                retry_count=safe_metadata.get(
+                    "llm.retry_count", safe_metadata.get("tool.retry_count")
+                ),
+                error_type=normalized_error["error.type"],
+                error_code=normalized_error["error.code"],
+            )
             _update_current_span_metadata(mapped_error)
             raise _SafeTraceFailure(
                 f"observability outcome: {failure_status}"
@@ -447,7 +724,7 @@ async def trace_async(
         logger.warning("Observability span setup failed: {}", setup_error)
         if metrics_token is not None:
             _run_metrics.reset(metrics_token)
-        return await func()
+        return await _run_untraced_with_metrics()
 
     try:
         await traced_call(safe_inputs)
@@ -556,6 +833,22 @@ def _new_run_metrics(
         "tool_success_count": 0,
         "tool_blocked": 0,
         "tool_failed": 0,
+        "tool_duration_ms_total": 0.0,
+        "tool_duration_ms_count": 0,
+        "llm_duration_ms_total": 0.0,
+        "llm_duration_ms_count": 0,
+        "llm_ttft_ms_total": 0.0,
+        "llm_ttft_ms_count": 0,
+        "llm_ttft_ms_min": None,
+        "llm_ttft_ms_max": None,
+        "retry_count": 0,
+        "retry_success_count": 0,
+        "retry_exhausted_count": 0,
+        "agent_retry_count": 0,
+        "agent_exception_count": 0,
+        "agent_exception_types": {},
+        "exception_count": 0,
+        "exception_types": {},
         "safety_checked": False,
         "safety_passed": False,
         "safety_error": False,
@@ -572,15 +865,84 @@ def _record_span_metrics(
     if metrics is None:
         return
     values = output if isinstance(output, Mapping) else {}
+    retry_count = _safe_integer(
+        values.get(
+            "retry_count",
+            values.get(
+                "llm.retry_count",
+                values.get(
+                    "tool.retry_count",
+                    metadata.get("llm.retry_count", metadata.get("tool.retry_count", 0)),
+                ),
+            ),
+        )
+    )
+    metric_retry_count = retry_count if run_type in {"llm", "tool"} else 0
+    if metric_retry_count > 0:
+        metrics["retry_count"] += 1
+        if values.get("tool.retry_exhausted") or values.get("status") in {"failed", "timeout"} or values.get(
+            "llm.outcome"
+        ) in {"error", "timeout"} or values.get("tool.outcome") in {
+            "error",
+            "timeout",
+        }:
+            metrics["retry_exhausted_count"] += 1
+        else:
+            metrics["retry_success_count"] += 1
+
+    if values.get("error.type"):
+        metrics["exception_count"] += 1
+        error_type = str(values["error.type"])
+        metrics["exception_types"][error_type] = (
+            metrics["exception_types"].get(error_type, 0) + 1
+        )
+    if values.get("safety.outcome") == "error" and not values.get("error.type"):
+        metrics["exception_count"] += 1
+        metrics["exception_types"]["SafetyCheckError"] = (
+            metrics["exception_types"].get("SafetyCheckError", 0) + 1
+        )
+
+    duration_ms = values.get("duration_ms")
+    if isinstance(duration_ms, (int, float)):
+        if run_type == "llm":
+            metrics["llm_duration_ms_total"] += float(duration_ms)
+            metrics["llm_duration_ms_count"] += 1
+        elif run_type == "tool":
+            metrics["tool_duration_ms_total"] += float(duration_ms)
+            metrics["tool_duration_ms_count"] += 1
+
     if name.startswith("agent."):
         agent_id = metadata.get("agent_id") or name.removeprefix("agent.")
         if agent_id:
             metrics["agent_ids"].add(str(agent_id))
+        agent_retry_count = _safe_integer(values.get("agent.retry_count"))
+        metrics["agent_retry_count"] += agent_retry_count
+        agent_exception_count = _safe_integer(values.get("agent.exception_count"))
+        metrics["agent_exception_count"] += agent_exception_count
+        for error_type, count in (values.get("agent.exception_types") or {}).items():
+            error_type_text = str(error_type)
+            metrics["agent_exception_types"][error_type_text] = (
+                metrics["agent_exception_types"].get(error_type_text, 0)
+                + _safe_integer(count)
+            )
     if run_type == "llm":
         metrics["llm_call_count"] += 1
         metrics["input_tokens"] += _safe_integer(values.get("llm.input_tokens"))
         metrics["output_tokens"] += _safe_integer(values.get("llm.output_tokens"))
         metrics["total_tokens"] += _safe_integer(values.get("llm.total_tokens"))
+        ttft_ms = values.get("llm.ttft_ms")
+        if isinstance(ttft_ms, (int, float)):
+            ttft = float(ttft_ms)
+            metrics["llm_ttft_ms_total"] += ttft
+            metrics["llm_ttft_ms_count"] += 1
+            previous_min = metrics["llm_ttft_ms_min"]
+            previous_max = metrics["llm_ttft_ms_max"]
+            metrics["llm_ttft_ms_min"] = (
+                ttft if previous_min is None else min(previous_min, ttft)
+            )
+            metrics["llm_ttft_ms_max"] = (
+                ttft if previous_max is None else max(previous_max, ttft)
+            )
     if run_type == "tool":
         metrics["tool_call_count"] += 1
         outcome = values.get("tool.outcome", "error")
@@ -600,6 +962,9 @@ def _augment_root_summary(mapped: Any) -> Dict[str, Any]:
     summary = dict(mapped) if isinstance(mapped, Mapping) else {}
     summary.setdefault("route", "unknown")
     metrics = _run_metrics.get() or _new_run_metrics()
+    exception_types = dict(metrics["exception_types"])
+    for error_type, count in metrics["agent_exception_types"].items():
+        exception_types[error_type] = exception_types.get(error_type, 0) + count
     summary.update(
         {
             "agent_count": len(metrics["agent_ids"]),
@@ -611,6 +976,43 @@ def _augment_root_summary(mapped: Any) -> Dict[str, Any]:
             "tool_success_count": metrics["tool_success_count"],
             "tool_blocked": metrics["tool_blocked"],
             "tool_failed": metrics["tool_failed"],
+            "tool_duration_ms_total": round(metrics["tool_duration_ms_total"], 3),
+            "tool_duration_ms_avg": round(
+                metrics["tool_duration_ms_total"]
+                / metrics["tool_duration_ms_count"],
+                3,
+            )
+            if metrics["tool_duration_ms_count"]
+            else 0.0,
+            "llm_duration_ms_total": round(metrics["llm_duration_ms_total"], 3),
+            "llm_duration_ms_avg": round(
+                metrics["llm_duration_ms_total"]
+                / metrics["llm_duration_ms_count"],
+                3,
+            )
+            if metrics["llm_duration_ms_count"]
+            else 0.0,
+            "llm_ttft_ms_count": metrics["llm_ttft_ms_count"],
+            "llm_ttft_ms_avg": round(
+                metrics["llm_ttft_ms_total"] / metrics["llm_ttft_ms_count"],
+                3,
+            )
+            if metrics["llm_ttft_ms_count"]
+            else None,
+            "llm_ttft_ms_min": metrics["llm_ttft_ms_min"],
+            "llm_ttft_ms_max": metrics["llm_ttft_ms_max"],
+            "retry_count": metrics["retry_count"],
+            "retry_success_count": metrics["retry_success_count"],
+            "retry_exhausted_count": metrics["retry_exhausted_count"],
+            "agent_retry_count": metrics["agent_retry_count"],
+            "agent_exception_count": metrics["agent_exception_count"],
+            "agent_exception_types": dict(metrics["agent_exception_types"]),
+            "exception_count": metrics["exception_count"],
+            "exception_total_count": (
+                metrics["exception_count"] + metrics["agent_exception_count"]
+            ),
+            "exception_types": dict(metrics["exception_types"]),
+            "exception_types_all": exception_types,
             "safety_checked": metrics["safety_checked"],
             "safety_passed": metrics["safety_passed"],
             "safety_error": metrics["safety_error"],
@@ -641,6 +1043,25 @@ def _update_current_span_metadata(mapped: Any) -> None:
         "tool_success_count",
         "tool_blocked",
         "tool_failed",
+        "duration_ms",
+        "tool_duration_ms_total",
+        "tool_duration_ms_avg",
+        "llm_duration_ms_total",
+        "llm_duration_ms_avg",
+        "llm_ttft_ms_count",
+        "llm_ttft_ms_avg",
+        "llm_ttft_ms_min",
+        "llm_ttft_ms_max",
+        "retry_count",
+        "retry_success_count",
+        "retry_exhausted_count",
+        "agent_retry_count",
+        "agent_exception_count",
+        "agent_exception_types",
+        "exception_count",
+        "exception_total_count",
+        "exception_types",
+        "exception_types_all",
         "safety_checked",
         "safety_passed",
         "safety_error",

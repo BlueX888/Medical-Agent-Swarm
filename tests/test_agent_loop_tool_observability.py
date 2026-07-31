@@ -105,8 +105,14 @@ async def test_successful_tool_call_emits_one_redacted_tool_span(monkeypatch):
     )
 
     tool_spans = [span for span in spans if span["run_type"] == "tool"]
+    state_spans = [span for span in spans if span["name"].startswith("state.")]
     assert result["answer"] == "done"
     assert len(tool_spans) == 1
+    assert {span["metadata"]["agent.state_stage"] for span in state_spans} == {
+        "after_llm",
+        "after_tool",
+        "final_output",
+    }
     assert tool_spans[0]["name"] == "tool.assess_risk"
     assert tool_spans[0]["inputs"] == {
         "tool_name": "assess_risk",
@@ -231,3 +237,36 @@ async def test_model_supplied_argument_key_is_canonicalized_to_schema(monkeypatc
     tool_span = next(span for span in spans if span["run_type"] == "tool")
     assert tool_span["inputs"]["argument_keys"] == ["symptoms", "unknown"]
     assert "Alice" not in repr(tool_span)
+
+
+@pytest.mark.asyncio
+async def test_tool_retry_is_recorded_on_the_tool_span(monkeypatch):
+    spans = []
+
+    async def capture_trace(**kwargs):
+        result = await kwargs["func"]()
+        output = kwargs["output_mapper"](result)
+        spans.append((kwargs, output))
+        return result
+
+    monkeypatch.setattr("core.agent_loop.trace_async", capture_trace)
+    agent = ToolAgent()
+    calls = 0
+
+    async def flaky_execute_tool(*, tool_name, arguments):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("transient")
+        return agent.tool_result
+
+    agent.execute_tool = flaky_execute_tool
+    result = await AgentLoop(max_iterations=2, max_tool_retries=1).run(
+        agent,
+        {"question": "private question"},
+    )
+
+    tool_span = next(item for item in spans if item[0]["run_type"] == "tool")
+    assert result["answer"] == "done"
+    assert calls == 2
+    assert tool_span[1]["tool.retry_count"] == 1

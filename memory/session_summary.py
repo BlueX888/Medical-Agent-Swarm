@@ -17,6 +17,7 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Dict, Any, List, Optional
 import json
+import uuid
 from loguru import logger
 
 
@@ -321,16 +322,23 @@ class SessionSummaryManager:
         date_dir.mkdir(parents=True, exist_ok=True)
         return date_dir / f"{session_id}.md"
 
-    def save_summary(self, summary: SessionSummary):
+    def save_summary(self, summary: SessionSummary) -> bool:
         """保存会话总结"""
         summary_path = self._get_summary_path(summary.session_id)
+        temporary_path = summary_path.with_name(
+            f".{summary_path.name}.{uuid.uuid4().hex}.tmp"
+        )
 
         try:
             content = summary.to_markdown()
-            summary_path.write_text(content, encoding="utf-8")
+            temporary_path.write_text(content, encoding="utf-8")
+            temporary_path.replace(summary_path)
             logger.info(f"Saved session summary: {summary.session_id}")
+            return True
         except Exception as e:
             logger.error(f"Error saving session summary: {e}")
+            temporary_path.unlink(missing_ok=True)
+            raise
 
     def load_summary(self, session_id: str) -> Optional[SessionSummary]:
         """加载会话总结（简化实现）"""

@@ -268,6 +268,21 @@ def test_durable_checkpoint_backend_fails_closed_without_encryption(tmp_path: Pa
         )
 
 
+def test_environment_defaults_to_encrypted_local_sqlite(monkeypatch, tmp_path: Path):
+    key_path = tmp_path / "checkpoint.key"
+    monkeypatch.setenv("CHECKPOINT_BACKEND", "sqlite")
+    monkeypatch.delenv("CHECKPOINT_AES_KEY", raising=False)
+    monkeypatch.setenv("CHECKPOINT_AES_KEY_FILE", str(key_path))
+
+    first = CheckpointSettings.from_env()
+    second = CheckpointSettings.from_env()
+
+    assert first.backend == "sqlite"
+    assert first.encryption_key == second.encryption_key
+    assert first.encryption_key == key_path.read_text(encoding="ascii")
+    assert len(first.encryption_key) == 32
+
+
 @pytest.mark.asyncio
 async def test_audit_attempts_survive_restart_and_are_encrypted(tmp_path: Path):
     settings = CheckpointSettings(
@@ -306,6 +321,17 @@ async def test_audit_effect_claim_survives_restart(tmp_path: Path):
 
     async with open_audit_store(settings) as audit_store:
         assert await audit_store.claim_effect("run-a", "long_term_memory") is False
+
+
+@pytest.mark.asyncio
+async def test_failed_effect_can_be_reclaimed_but_active_claim_cannot():
+    from core.audit import MemoryAuditStore
+
+    audit_store = MemoryAuditStore()
+    assert await audit_store.claim_effect("run-a", "summary") is True
+    assert await audit_store.claim_effect("run-a", "summary") is False
+    await audit_store.complete_effect("run-a", "summary", "failed")
+    assert await audit_store.claim_effect("run-a", "summary") is True
 
 
 def test_sqlite_file_lease_excludes_another_process(tmp_path: Path):

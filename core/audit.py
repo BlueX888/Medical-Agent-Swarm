@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol
 
 from .checkpointing import CheckpointSettings, checkpoint_serializer
+
+
+EFFECT_LEASE_SECONDS = 300
 
 
 class AuditStore(Protocol):
@@ -31,7 +34,7 @@ class AuditStore(Protocol):
 class MemoryAuditStore:
     def __init__(self):
         self._attempts: Dict[tuple[str, str], Dict[str, Any]] = {}
-        self._effects: Dict[tuple[str, str], str] = {}
+        self._effects: Dict[tuple[str, str], tuple[str, datetime]] = {}
 
     async def save_attempt(
         self,
@@ -52,9 +55,18 @@ class MemoryAuditStore:
 
     async def claim_effect(self, run_id: str, effect_name: str) -> bool:
         key = (run_id, effect_name)
-        if key in self._effects:
-            return False
-        self._effects[key] = "claimed"
+        now = datetime.now(timezone.utc)
+        current = self._effects.get(key)
+        if current:
+            status, updated_at = current
+            if status == "completed":
+                return False
+            if (
+                status == "claimed"
+                and now - updated_at < timedelta(seconds=EFFECT_LEASE_SECONDS)
+            ):
+                return False
+        self._effects[key] = ("claimed", now)
         return True
 
     async def complete_effect(
@@ -63,7 +75,11 @@ class MemoryAuditStore:
         effect_name: str,
         status: str,
     ) -> None:
-        self._effects[(run_id, effect_name)] = status
+        _validate_effect_status(status)
+        self._effects[(run_id, effect_name)] = (
+            status,
+            datetime.now(timezone.utc),
+        )
 
 
 class SqliteAuditStore:
@@ -144,16 +160,26 @@ class SqliteAuditStore:
         ]
 
     async def claim_effect(self, run_id: str, effect_name: str) -> bool:
+        now = datetime.now(timezone.utc)
+        expired_before = now - timedelta(seconds=EFFECT_LEASE_SECONDS)
         cursor = await self.connection.execute(
             """
-            INSERT OR IGNORE INTO workflow_effects (
+            INSERT INTO workflow_effects (
                 run_id, effect_name, status, updated_at
             ) VALUES (?, ?, 'claimed', ?)
+            ON CONFLICT(run_id, effect_name) DO UPDATE SET
+                status='claimed',
+                updated_at=excluded.updated_at
+            WHERE workflow_effects.status = 'failed'
+               OR (workflow_effects.status = 'claimed'
+                   AND workflow_effects.updated_at < ?)
+            RETURNING status
             """,
-            (run_id, effect_name, datetime.now(timezone.utc).isoformat()),
+            (run_id, effect_name, now.isoformat(), expired_before.isoformat()),
         )
+        row = await cursor.fetchone()
         await self.connection.commit()
-        return cursor.rowcount == 1
+        return row is not None
 
     async def complete_effect(
         self,
@@ -161,6 +187,7 @@ class SqliteAuditStore:
         effect_name: str,
         status: str,
     ) -> None:
+        _validate_effect_status(status)
         await self.connection.execute(
             """
             UPDATE workflow_effects
@@ -247,15 +274,23 @@ class PostgresAuditStore:
         ]
 
     async def claim_effect(self, run_id: str, effect_name: str) -> bool:
+        expired_before = datetime.now(timezone.utc) - timedelta(
+            seconds=EFFECT_LEASE_SECONDS
+        )
         cursor = await self.connection.execute(
             """
             INSERT INTO workflow_effects (
                 run_id, effect_name, status, updated_at
             ) VALUES (%s, %s, 'claimed', NOW())
-            ON CONFLICT(run_id, effect_name) DO NOTHING
+            ON CONFLICT(run_id, effect_name) DO UPDATE SET
+                status='claimed',
+                updated_at=NOW()
+            WHERE workflow_effects.status = 'failed'
+               OR (workflow_effects.status = 'claimed'
+                   AND workflow_effects.updated_at < %s)
             RETURNING run_id
             """,
-            (run_id, effect_name),
+            (run_id, effect_name, expired_before),
         )
         return await cursor.fetchone() is not None
 
@@ -265,6 +300,7 @@ class PostgresAuditStore:
         effect_name: str,
         status: str,
     ) -> None:
+        _validate_effect_status(status)
         await self.connection.execute(
             """
             UPDATE workflow_effects
@@ -273,6 +309,11 @@ class PostgresAuditStore:
             """,
             (status, run_id, effect_name),
         )
+
+
+def _validate_effect_status(status: str) -> None:
+    if status not in {"completed", "failed"}:
+        raise ValueError("effect status must be 'completed' or 'failed'")
 
 
 @asynccontextmanager

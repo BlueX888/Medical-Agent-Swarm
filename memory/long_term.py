@@ -106,17 +106,20 @@ class LongTermMemory:
             # 构建记忆文本（包含问题和答案摘要）
             memory_text = f"问题：{question}\\n回答：{answer[:500]}..."
 
-            # 添加到 Mem0
-            result = self.mem0.add(
-                messages=[{"role": "user", "content": memory_text}],
-                user_id="medix_user",  # 固定用户ID（可扩展为多用户）
-                metadata={
+            # 添加到 Mem0；run_id 让恢复重试归属于同一工作流运行。
+            add_options = {
+                "messages": [{"role": "user", "content": memory_text}],
+                "user_id": "medix_user",  # 固定用户ID（可扩展为多用户）
+                "metadata": {
                     "type": "session_summary",
                     "session_id": session_id,
                     "timestamp": datetime.now().isoformat(),
-                    **(metadata or {})
-                }
-            )
+                    **(metadata or {}),
+                },
+            }
+            if metadata and metadata.get("run_id"):
+                add_options["run_id"] = metadata["run_id"]
+            result = self.mem0.add(**add_options)
 
             # 提取记忆ID
             if isinstance(result, dict):
@@ -190,5 +193,4 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []
-
 

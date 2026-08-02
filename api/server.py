@@ -206,16 +206,20 @@ async def resume_run(
 
 
 @app.get("/api/runs")
-async def list_runs(limit: int = Query(default=50, ge=1, le=200)) -> Dict[str, List[Dict[str, Any]]]:
+async def list_runs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> Dict[str, List[Dict[str, Any]]]:
+    _require_checkpoint_admin(request)
     return {"runs": [run.to_dict() for run in RUN_STORE.list(limit=limit)]}
 
 
 @app.get("/api/runs/{run_id}", response_model=DebugRunResponse)
 async def get_run(request: Request, run_id: str) -> DebugRunResponse:
+    _require_checkpoint_admin(request)
     collector = RUN_STORE.get(run_id)
     if collector:
         return DebugRunResponse(run=collector.get_run().to_dict())
-    _require_checkpoint_admin(request)
     attempts = await _audit_store(request).get_attempts(run_id)
     if not attempts:
         raise HTTPException(status_code=404, detail=f"Debug run not found: {run_id}")
@@ -224,12 +228,12 @@ async def get_run(request: Request, run_id: str) -> DebugRunResponse:
 
 @app.get("/api/runs/{run_id}/events", response_model=DebugEventsResponse)
 async def get_run_events(request: Request, run_id: str) -> DebugEventsResponse:
+    _require_checkpoint_admin(request)
     collector = RUN_STORE.get(run_id)
     if collector:
         return DebugEventsResponse(
             events=[event.to_dict() for event in collector.get_events()]
         )
-    _require_checkpoint_admin(request)
     attempts = await _audit_store(request).get_attempts(run_id)
     if not attempts:
         raise HTTPException(status_code=404, detail=f"Debug run not found: {run_id}")

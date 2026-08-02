@@ -384,6 +384,37 @@ async def test_graph_claims_non_transactional_long_term_write_once_per_run():
 
 
 @pytest.mark.asyncio
+async def test_graph_retries_failed_long_term_outbox_effect():
+    class FlakyLongTermMemory:
+        enabled = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def add_session_summary(self, **kwargs):
+            self.calls += 1
+            return None if self.calls == 1 else "memory-a"
+
+    graph = make_graph_for_memory_nodes()
+    graph.enable_long_term_memory = True
+    graph.long_term_memory = FlakyLongTermMemory()
+    graph.audit_store = MemoryAuditStore()
+    state = {
+        "session_id": "session-a",
+        "question": "current question",
+        "result": {"answer": "final answer"},
+        "start_time": datetime.now(),
+        "mode": "single_agent",
+        "run_id": "retry-run-a",
+    }
+
+    await graph.save_memory(state)
+    await graph.save_memory(state)
+
+    assert graph.long_term_memory.calls == 2
+
+
+@pytest.mark.asyncio
 async def test_full_swarm_workflow_persists_only_one_completed_turn(
     short_term_memory_factory,
 ):

@@ -792,7 +792,9 @@ class MedicalSwarmGraph:
                             start_time=state["start_time"],
                             end_time=end_time,
                         )
-                        self.session_manager.save_summary(summary)
+                        summary_result = self.session_manager.save_summary(summary)
+                        if summary_result is False:
+                            raise RuntimeError("Session summary was not persisted")
                         summary_saved = True
                         await self._complete_memory_effect(
                             state, "session_summary", "completed"

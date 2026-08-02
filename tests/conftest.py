@@ -7,6 +7,12 @@ import pytest
 from memory import ShortTermMemory
 
 
+@pytest.fixture(autouse=True)
+def use_ephemeral_checkpoints_in_tests(monkeypatch):
+    """Application tests opt into memory; persistence tests configure storage."""
+    monkeypatch.setenv("CHECKPOINT_BACKEND", "memory")
+
+
 class FakeRedisShortTermMemoryAdapter:
     """Redis protocol test double; never used by application code."""
 

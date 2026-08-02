@@ -252,22 +252,25 @@ def test_debug_api_reads_durable_audit_only_for_admin(monkeypatch):
         name="plan",
         output={"answer": "sensitive answer"},
     )
+    server.RUN_STORE.add(collector)
 
     with TestClient(server.app) as client:
         asyncio.run(
             server.app.state.audit_store.save_attempt(
-                "durable-audit-run",
+                "durable-audit-fallback",
                 "attempt-a",
                 collector.to_dict(),
             )
         )
 
+        forbidden_list = client.get("/api/runs")
         forbidden = client.get("/api/runs/durable-audit-run/events")
         allowed = client.get(
-            "/api/runs/durable-audit-run/events",
+            "/api/runs/durable-audit-fallback/events",
             headers={"X-Checkpoint-Admin-Token": "test-admin-token"},
         )
 
+    assert forbidden_list.status_code == 403
     assert forbidden.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["events"][0]["metadata"]["audit_attempt_id"] == "attempt-a"

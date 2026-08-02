@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import secrets
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -154,13 +155,19 @@ class CheckpointSettings:
 
     @classmethod
     def from_env(cls) -> "CheckpointSettings":
+        backend = os.getenv("CHECKPOINT_BACKEND", "sqlite").strip().lower()
+        encryption_key = os.getenv("CHECKPOINT_AES_KEY") or None
+        if backend == "sqlite" and not encryption_key:
+            encryption_key = _load_or_create_local_key(
+                Path(os.getenv("CHECKPOINT_AES_KEY_FILE", ".data/checkpoint.key"))
+            )
         return cls(
-            backend=os.getenv("CHECKPOINT_BACKEND", "memory"),
+            backend=backend,
             sqlite_path=Path(
                 os.getenv("CHECKPOINT_SQLITE_PATH", ".data/checkpoints.sqlite3")
             ),
             postgres_dsn=os.getenv("CHECKPOINT_POSTGRES_DSN"),
-            encryption_key=os.getenv("CHECKPOINT_AES_KEY"),
+            encryption_key=encryption_key,
             allow_plaintext=_boolean_env("CHECKPOINT_ALLOW_PLAINTEXT", False),
         )
 
@@ -381,3 +388,31 @@ def _boolean_env(name: str, default: bool) -> bool:
     raise CheckpointConfigurationError(
         f"{name} must be true or false, got {value!r}"
     )
+
+
+def _load_or_create_local_key(path: Path) -> str:
+    """Load, or atomically create, a local 32-byte SQLite encryption key."""
+    key_path = path.expanduser().resolve()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        key = key_path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        key = secrets.token_hex(16)
+        try:
+            descriptor = os.open(
+                key_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            key = key_path.read_text(encoding="ascii").strip()
+        else:
+            with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                handle.write(key)
+                handle.flush()
+                os.fsync(handle.fileno())
+    if len(key.encode("utf-8")) not in {16, 24, 32}:
+        raise CheckpointConfigurationError(
+            f"Invalid SQLite checkpoint key file: {key_path}"
+        )
+    return key

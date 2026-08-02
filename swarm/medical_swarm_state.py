@@ -2,12 +2,20 @@
 LangGraph state for the medical swarm workflow.
 """
 from datetime import datetime
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
+
+from langgraph.channels import UntrackedValue
 
 
 class MedicalSwarmState(TypedDict, total=False):
     """State passed through the medical swarm graph."""
 
+    schema_version: int
+    graph_version: str
+    run_id: str
+    enable_swarm: bool
+    enable_short_term_memory: bool
+    enable_long_term_memory: bool
     question: str
     context: Dict[str, Any]
     enhanced_context: Dict[str, Any]
@@ -21,15 +29,16 @@ class MedicalSwarmState(TypedDict, total=False):
 
     assessment: Dict[str, Any]
     subtasks: List[Dict[str, Any]]
-    route_plan: Any
+    route_plan: Dict[str, Any]
     route: str
     mode: str
 
-    shared_context: Any
+    shared_context: Dict[str, Any]
     final_answer: str
     result: Dict[str, Any]
 
     timeout_occurred: bool
     swarm_timeout_s: Optional[float]
     error: Optional[str]
-    debug_collector: Any
+    # Observability objects are process-local dependencies, not durable state.
+    debug_collector: Annotated[Any, UntrackedValue]

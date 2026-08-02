@@ -31,6 +31,30 @@ async def test_saved_turn_is_loaded_in_conversation_order(short_term_memory_fact
 
 
 @pytest.mark.asyncio
+async def test_save_turn_is_idempotent_when_operation_key_is_reused(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    first = await memory.save_turn(
+        "session-a",
+        "same question",
+        "same answer",
+        idempotency_key="run-a:save_memory",
+    )
+    duplicate = await memory.save_turn(
+        "session-a",
+        "same question",
+        "same answer",
+        idempotency_key="run-a:save_memory",
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert len(await memory.load_context("session-a")) == 2
+
+
+@pytest.mark.asyncio
 async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns(
     short_term_memory_factory,
 ):

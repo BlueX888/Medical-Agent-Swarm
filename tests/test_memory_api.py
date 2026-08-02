@@ -1,9 +1,11 @@
 import asyncio
 import time
+from contextlib import asynccontextmanager
 
 from fastapi.testclient import TestClient
 
 import api.server as server
+from core.checkpointing import CheckpointSnapshot
 from memory import ShortTermMemory, ShortTermMemoryUnavailable
 
 
@@ -46,6 +48,8 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
         **kwargs,
     ):
         assert coordinator.short_term_memory is memory
+        assert coordinator.medical_graph.checkpointer is server.app.state.checkpointer
+        assert kwargs["run_id"]
         await coordinator.short_term_memory.save_turn(
             session_id,
             question,
@@ -110,6 +114,83 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
         assert client.get("/api/sessions/session-api/memory").json()[
             "recent_history"
         ] == []
+
+
+def test_checkpoint_api_lists_history_and_accepts_resume(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+    resumed = asyncio.Event()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    class CheckpointCoordinatorProbe:
+        def __init__(self, *, short_term_memory, checkpointer, **kwargs):
+            assert short_term_memory is memory
+            assert checkpointer is server.app.state.checkpointer
+
+        async def get_checkpoint(self, run_id, checkpoint_id=None):
+            return CheckpointSnapshot(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id or "checkpoint-latest",
+                values={
+                    "question": "resume question",
+                    "context": {"age": 30},
+                    "session_id": "session-a",
+                },
+                next_nodes=("finish",),
+                metadata={"step": 2},
+                created_at="2026-08-02T00:00:00+00:00",
+                parent_checkpoint_id="checkpoint-parent",
+                status="pending",
+            )
+
+        async def list_checkpoints(self, run_id, *, limit=None):
+            checkpoint = await self.get_checkpoint(run_id)
+            return [checkpoint]
+
+        async def resume(self, run_id, checkpoint_id=None):
+            resumed.set()
+            return {"answer": "resumed", "run_id": run_id}
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    monkeypatch.setattr(server, "SwarmCoordinator", CheckpointCoordinatorProbe)
+
+    with TestClient(server.app) as client:
+        history = client.get("/api/runs/run-a/checkpoints")
+        resumed_response = client.post(
+            "/api/runs/run-a/resume",
+            json={"checkpoint_id": "checkpoint-a"},
+        )
+
+        assert history.status_code == 200
+        assert history.json()["checkpoints"][0] == {
+            "run_id": "run-a",
+            "checkpoint_id": "checkpoint-latest",
+            "values": {
+                "question": "resume question",
+                "context": {"age": 30},
+                "session_id": "session-a",
+            },
+            "next_nodes": ["finish"],
+            "metadata": {"step": 2},
+            "created_at": "2026-08-02T00:00:00+00:00",
+            "parent_checkpoint_id": "checkpoint-parent",
+            "status": "pending",
+        }
+        assert resumed_response.status_code == 200
+        assert resumed_response.json()["run_id"] == "run-a"
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not resumed.is_set():
+            time.sleep(0.01)
+        assert resumed.is_set()
 
 
 def test_memory_api_returns_service_unavailable_when_redis_cannot_be_read(

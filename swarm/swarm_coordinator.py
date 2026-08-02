@@ -55,6 +55,7 @@ class SwarmCoordinator:
         enable_long_term_memory: Optional[bool] = None,
         swarm_timeout_s: float = 120.0,
         short_term_memory: Optional[ShortTermMemory] = None,
+        checkpointer: Optional[Any] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
@@ -96,6 +97,7 @@ class SwarmCoordinator:
             enable_long_term_memory=self.enable_long_term_memory,
             swarm_timeout=self.swarm_timeout_s,
             agent_catalog=self.agent_catalog,
+            checkpointer=checkpointer,
         )
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
@@ -116,6 +118,7 @@ class SwarmCoordinator:
         session_id: Optional[str] = None,
         debug_collector: Optional[DebugTraceCollector] = None,
         swarm_timeout_s: Optional[float] = None,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a user question.
@@ -133,9 +136,18 @@ class SwarmCoordinator:
             "question": question,
             "context": context or {},
             "session_id": session_id,
+            "enable_swarm": self.enable_swarm,
+            "enable_short_term_memory": self.enable_short_term_memory,
+            "enable_long_term_memory": self.enable_long_term_memory,
+            "swarm_timeout_s": (
+                swarm_timeout_s
+                if swarm_timeout_s is not None
+                else self.swarm_timeout_s
+            ),
         }
-        if swarm_timeout_s is not None:
-            initial_state["swarm_timeout_s"] = swarm_timeout_s
+        effective_run_id = run_id or getattr(debug_collector, "run_id", None)
+        if effective_run_id:
+            initial_state["run_id"] = effective_run_id
         if debug_collector:
             initial_state["debug_collector"] = debug_collector
 
@@ -180,6 +192,33 @@ class SwarmCoordinator:
         else:
             state = await invoke_graph()
         return state["result"]
+
+    async def resume(
+        self,
+        run_id: str,
+        checkpoint_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Resume a previously checkpointed workflow run."""
+        checkpoint = await self.medical_graph.get_checkpoint(run_id, checkpoint_id)
+        if checkpoint is None:
+            raise LookupError(f"Checkpoint run not found: {run_id}")
+
+        session_id = checkpoint.values.get("session_id")
+
+        async def invoke_resume() -> Dict[str, Any]:
+            state = await self.medical_graph.resume(run_id, checkpoint_id)
+            return state["result"]
+
+        if self.enable_short_term_memory and session_id:
+            async with self.short_term_memory.session_scope(str(session_id)):
+                return await invoke_resume()
+        return await invoke_resume()
+
+    async def get_checkpoint(self, run_id: str, checkpoint_id: Optional[str] = None):
+        return await self.medical_graph.get_checkpoint(run_id, checkpoint_id)
+
+    async def list_checkpoints(self, run_id: str, *, limit: Optional[int] = None):
+        return await self.medical_graph.list_checkpoints(run_id, limit=limit)
 
     def _trace_result_summary(
         self,

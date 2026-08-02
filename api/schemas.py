@@ -20,6 +20,10 @@ class RunCreateResponse(BaseModel):
     run: Dict[str, Any]
 
 
+class RunResumeRequest(BaseModel):
+    checkpoint_id: Optional[str] = None
+
+
 class DebugRunResponse(BaseModel):
     run: Dict[str, Any]
 

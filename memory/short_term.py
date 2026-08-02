@@ -7,6 +7,7 @@ results, and debug traces stay in their request-local stores.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -30,6 +31,22 @@ REDIS_CONNECTION_OPTIONS = {
     "socket_connect_timeout": 1.0,
     "socket_timeout": 1.0,
 }
+
+_IDEMPOTENT_APPEND_SCRIPT = """
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return 0
+end
+local message_count = #ARGV - 2
+local max_messages = tonumber(ARGV[#ARGV - 1])
+local ttl_seconds = tonumber(ARGV[#ARGV])
+redis.call('SET', KEYS[2], '1', 'EX', ttl_seconds)
+for index = 1, message_count do
+    redis.call('RPUSH', KEYS[1], ARGV[index])
+end
+redis.call('LTRIM', KEYS[1], -max_messages, -1)
+redis.call('EXPIRE', KEYS[1], ttl_seconds)
+return 1
+"""
 
 
 class ShortTermMemoryError(RuntimeError):
@@ -90,7 +107,8 @@ class ShortTermMemoryAdapter(Protocol):
         self,
         session_id: str,
         messages: List[Dict[str, Any]],
-    ) -> None:
+        idempotency_key: Optional[str] = None,
+    ) -> bool:
         ...
 
     async def clear_session(self, session_id: str) -> bool:
@@ -184,7 +202,8 @@ class RedisShortTermMemoryAdapter:
         self,
         session_id: str,
         messages: List[Dict[str, Any]],
-    ) -> None:
+        idempotency_key: Optional[str] = None,
+    ) -> bool:
         key = self._key(session_id)
         try:
             serialized = [
@@ -196,11 +215,25 @@ class RedisShortTermMemoryAdapter:
                 "Short-term memory message is not JSON serializable"
             ) from exc
         try:
+            if idempotency_key:
+                operation_key = self._operation_key(session_id, idempotency_key)
+                result = await self._redis.eval(
+                    _IDEMPOTENT_APPEND_SCRIPT,
+                    2,
+                    key,
+                    operation_key,
+                    *serialized,
+                    self.max_messages,
+                    self.ttl_seconds,
+                )
+                return bool(result)
+
             async with self._redis.pipeline(transaction=True) as pipeline:
                 pipeline.rpush(key, *serialized)
                 pipeline.ltrim(key, -self.max_messages, -1)
                 pipeline.expire(key, self.ttl_seconds)
                 await pipeline.execute()
+            return True
         except Exception as exc:
             logger.warning(f"Failed to save Redis short-term memory: {exc}")
             raise ShortTermMemoryUnavailable(
@@ -243,6 +276,11 @@ class RedisShortTermMemoryAdapter:
     @staticmethod
     def _key(session_id: str) -> str:
         return f"{KEY_PREFIX}:{session_id}"
+
+    @staticmethod
+    def _operation_key(session_id: str, idempotency_key: str) -> str:
+        digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        return f"{KEY_PREFIX}:{session_id}:operations:{digest}"
 
     @staticmethod
     def _create_client(
@@ -328,7 +366,8 @@ class ShortTermMemory:
         user_message: str,
         assistant_message: str,
         assistant_metadata: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        idempotency_key: Optional[str] = None,
+    ) -> bool:
         """Atomically append one completed user/assistant turn."""
         self._validate_session_id(session_id)
         if not isinstance(user_message, str) or not user_message.strip():
@@ -344,7 +383,15 @@ class ShortTermMemory:
                 metadata=assistant_metadata,
             ).to_dict(),
         ]
-        await self._adapter.save_messages(session_id, messages)
+        if idempotency_key is None:
+            result = await self._adapter.save_messages(session_id, messages)
+        else:
+            result = await self._adapter.save_messages(
+                session_id,
+                messages,
+                idempotency_key=idempotency_key,
+            )
+        return True if result is None else bool(result)
 
     async def clear_session(self, session_id: str) -> bool:
         """Delete a session, returning whether it existed."""

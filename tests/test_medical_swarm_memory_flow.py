@@ -2,9 +2,11 @@ import asyncio
 from datetime import datetime
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 
 from memory import ShortTermMemoryUnavailable
 from debug import DebugTraceCollector
+from core.checkpointing import CheckpointSnapshot
 import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 from swarm.swarm_coordinator import SwarmCoordinator
@@ -13,6 +15,7 @@ from swarm.swarm_coordinator import SwarmCoordinator
 class RecordingShortTermMemory:
     def __init__(self):
         self.saved_turns = []
+        self.idempotency_keys = set()
 
     async def load_context(self, session_id, max_turns=5):
         assert session_id == "session-a"
@@ -36,9 +39,15 @@ class RecordingShortTermMemory:
         user_message,
         assistant_message,
         assistant_metadata=None,
+        idempotency_key=None,
     ):
         assert isinstance(assistant_metadata, dict)
+        if idempotency_key and idempotency_key in self.idempotency_keys:
+            return False
+        if idempotency_key:
+            self.idempotency_keys.add(idempotency_key)
         self.saved_turns.append((session_id, user_message, assistant_message))
+        return True
 
 
 class DisabledLongTermMemory:
@@ -97,8 +106,10 @@ class ConcurrentRunProbe:
         self.max_active = 0
         self.first_started = asyncio.Event()
         self.completed = []
+        self.last_state = None
 
     async def ainvoke(self, state):
+        self.last_state = state
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         if state["question"] == "first":
@@ -107,6 +118,27 @@ class ConcurrentRunProbe:
         self.completed.append(state["question"])
         self.active -= 1
         return {"result": {"answer": state["question"]}}
+
+
+class ResumeProbe:
+    def __init__(self):
+        self.resumed = []
+
+    async def get_checkpoint(self, run_id, checkpoint_id=None):
+        return CheckpointSnapshot(
+            run_id=run_id,
+            checkpoint_id=checkpoint_id or "latest",
+            values={"session_id": "resume-session"},
+            next_nodes=("finish",),
+            metadata={},
+            created_at=None,
+            parent_checkpoint_id=None,
+            status="pending",
+        )
+
+    async def resume(self, run_id, checkpoint_id=None):
+        self.resumed.append((run_id, checkpoint_id))
+        return {"result": {"answer": "resumed", "run_id": run_id}}
 
 
 def make_coordinator_for_concurrency(memory, graph):
@@ -119,6 +151,45 @@ def make_coordinator_for_concurrency(memory, graph):
     coordinator.medical_graph = graph
     coordinator.worker_pool = []
     return coordinator
+
+
+@pytest.mark.asyncio
+async def test_coordinator_propagates_explicit_run_id_to_graph(
+    short_term_memory_factory,
+):
+    graph = ConcurrentRunProbe()
+    coordinator = make_coordinator_for_concurrency(
+        short_term_memory_factory(),
+        graph,
+    )
+
+    await coordinator.process(
+        "question",
+        session_id="session-a",
+        run_id="durable-run-a",
+    )
+
+    assert graph.completed == ["question"]
+    assert graph.last_state["run_id"] == "durable-run-a"
+    assert graph.last_state["enable_swarm"] is False
+    assert graph.last_state["enable_short_term_memory"] is True
+    assert graph.last_state["enable_long_term_memory"] is False
+
+
+@pytest.mark.asyncio
+async def test_coordinator_resumes_checkpoint_inside_session_scope(
+    short_term_memory_factory,
+):
+    graph = ResumeProbe()
+    coordinator = make_coordinator_for_concurrency(
+        short_term_memory_factory(),
+        graph,
+    )
+
+    result = await coordinator.resume("durable-run-a", "checkpoint-a")
+
+    assert result == {"answer": "resumed", "run_id": "durable-run-a"}
+    assert graph.resumed == [("durable-run-a", "checkpoint-a")]
 
 
 def make_graph_for_memory_nodes():
@@ -258,6 +329,18 @@ async def test_graph_saves_exactly_one_user_visible_turn():
             "result": {"answer": "最终回答"},
             "start_time": datetime.now(),
             "mode": "single_agent",
+            "run_id": "run-a",
+        }
+    )
+
+    await graph.save_memory(
+        {
+            "session_id": "session-a",
+            "question": "当前问题",
+            "result": {"answer": "最终回答"},
+            "start_time": datetime.now(),
+            "mode": "single_agent",
+            "run_id": "run-a",
         }
     )
 
@@ -310,6 +393,7 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
     memory = short_term_memory_factory()
     consultation = FakeWorker("consultation_agent")
     diagnostic = FakeWorker("diagnostic_agent")
+    checkpointer = InMemorySaver()
     graph = SwarmAcceptanceGraph(
         llm_client=object(),
         worker_pool=[consultation, diagnostic],
@@ -322,6 +406,7 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
         enable_swarm=True,
         enable_short_term_memory=False,
         enable_long_term_memory=False,
+        checkpointer=checkpointer,
     )
     collector = DebugTraceCollector(
         question="需要多角度分析的问题",
@@ -343,3 +428,7 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
         event.name == "subtasks_created"
         for event in collector.get_events()
     )
+    checkpoint = await graph.get_checkpoint(collector.run_id)
+    assert checkpoint is not None
+    assert "debug_collector" not in checkpoint.values
+    assert isinstance(checkpoint.values["shared_context"], dict)

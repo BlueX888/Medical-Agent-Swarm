@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +12,11 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.skill_loader import discover_skills, is_active_skill
+from core.checkpointing import (
+    CheckpointSettings,
+    CheckpointingDisabledError,
+    open_checkpointer,
+)
 from debug import DebugTraceCollector, InMemoryTraceStore
 from memory import (
     LongTermMemory,
@@ -28,6 +34,7 @@ from .schemas import (
     MemoryResponse,
     RunCreateRequest,
     RunCreateResponse,
+    RunResumeRequest,
     SkillInfo,
 )
 
@@ -40,10 +47,14 @@ LONG_TERM_MEMORY = LongTermMemory()
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     application.state.short_term_memory = await create_short_term_memory()
-    try:
-        yield
-    finally:
-        await application.state.short_term_memory.close()
+    settings = CheckpointSettings.from_env()
+    async with open_checkpointer(settings) as checkpointer:
+        application.state.checkpoint_settings = settings
+        application.state.checkpointer = checkpointer
+        try:
+            yield
+        finally:
+            await application.state.short_term_memory.close()
 
 
 app = FastAPI(
@@ -95,7 +106,12 @@ async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateRe
     RUN_STORE.add(collector)
 
     asyncio.create_task(
-        _execute_run(payload, collector, _short_term_memory(request))
+        _execute_run(
+            payload,
+            collector,
+            _short_term_memory(request),
+            _checkpointer(request),
+        )
     )
 
     run = collector.get_run().to_dict()
@@ -104,6 +120,59 @@ async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateRe
         status=run["status"],
         run=run,
     )
+
+
+@app.get("/api/runs/{run_id}/checkpoints")
+async def list_run_checkpoints(
+    request: Request,
+    run_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> Dict[str, Any]:
+    coordinator = _checkpoint_coordinator(request)
+    try:
+        checkpoints = await coordinator.list_checkpoints(run_id, limit=limit)
+    except CheckpointingDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"run_id": run_id, "checkpoints": [asdict(item) for item in checkpoints]}
+
+
+@app.post("/api/runs/{run_id}/resume", response_model=RunCreateResponse)
+async def resume_run(
+    request: Request,
+    run_id: str,
+    payload: RunResumeRequest,
+) -> RunCreateResponse:
+    coordinator = _checkpoint_coordinator(request)
+    try:
+        checkpoint = await coordinator.get_checkpoint(run_id, payload.checkpoint_id)
+    except CheckpointingDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if checkpoint is None:
+        raise HTTPException(status_code=404, detail=f"Checkpoint run not found: {run_id}")
+
+    coordinator = _checkpoint_coordinator(request, checkpoint.values)
+
+    collector = DebugTraceCollector(
+        question=str(checkpoint.values.get("question") or ""),
+        context=dict(checkpoint.values.get("context") or {}),
+        session_id=checkpoint.values.get("session_id"),
+        run_id=run_id,
+        metadata={
+            "source": "checkpoint_resume",
+            "checkpoint_id": payload.checkpoint_id or checkpoint.checkpoint_id,
+        },
+    )
+    RUN_STORE.add(collector)
+    asyncio.create_task(
+        _execute_resume(
+            coordinator,
+            collector,
+            run_id,
+            payload.checkpoint_id,
+        )
+    )
+    run = collector.get_run().to_dict()
+    return RunCreateResponse(run_id=run_id, status=run["status"], run=run)
 
 
 @app.get("/api/runs")
@@ -220,6 +289,7 @@ async def _execute_run(
     payload: RunCreateRequest,
     collector: DebugTraceCollector,
     short_term_memory: ShortTermMemory,
+    checkpointer: Any,
 ) -> None:
     try:
         coordinator = SwarmCoordinator(
@@ -228,12 +298,32 @@ async def _execute_run(
             enable_short_term_memory=payload.enable_short_term_memory,
             enable_long_term_memory=payload.enable_long_term_memory,
             short_term_memory=short_term_memory,
+            checkpointer=checkpointer,
         )
         await coordinator.process(
             question=payload.question,
             context=payload.context,
             session_id=payload.session_id,
             debug_collector=collector,
+            run_id=collector.run_id,
+        )
+    except Exception as exc:
+        collector.finish_failed(exc)
+
+
+async def _execute_resume(
+    coordinator: SwarmCoordinator,
+    collector: DebugTraceCollector,
+    run_id: str,
+    checkpoint_id: Optional[str],
+) -> None:
+    try:
+        result = await coordinator.resume(run_id, checkpoint_id)
+        collector.finish_success(
+            result_json=result,
+            route=result.get("route"),
+            final_answer=result.get("answer", ""),
+            timeout=bool(result.get("timeout_occurred", False)),
         )
     except Exception as exc:
         collector.finish_failed(exc)
@@ -241,6 +331,27 @@ async def _execute_run(
 
 def _short_term_memory(request: Request) -> ShortTermMemory:
     return request.app.state.short_term_memory
+
+
+def _checkpointer(request: Request) -> Any:
+    return request.app.state.checkpointer
+
+
+def _checkpoint_coordinator(
+    request: Request,
+    checkpoint_values: Optional[Dict[str, Any]] = None,
+) -> SwarmCoordinator:
+    values = checkpoint_values or {}
+    return SwarmCoordinator(
+        short_term_memory=_short_term_memory(request),
+        checkpointer=_checkpointer(request),
+        enable_swarm=bool(values.get("enable_swarm", True)),
+        enable_short_term_memory=bool(
+            values.get("enable_short_term_memory", True)
+        ),
+        enable_long_term_memory=bool(values.get("enable_long_term_memory", True)),
+        swarm_timeout_s=float(values.get("swarm_timeout_s") or 120.0),
+    )
 
 
 def _get_collector_or_404(run_id: str) -> DebugTraceCollector:

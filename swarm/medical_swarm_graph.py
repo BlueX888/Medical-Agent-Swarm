@@ -15,6 +15,13 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from core import LLMClient
+from core.checkpointing import (
+    CheckpointSnapshot,
+    CheckpointingDisabledError,
+    RunAlreadyExistsError,
+    claim_run,
+    checkpoint_config,
+)
 from core.observability import trace_async
 from debug import DebugTraceCollector
 from memory import (
@@ -39,6 +46,10 @@ from .routing_models import (
 from .shared_context import SharedContext
 
 
+MEDICAL_SWARM_STATE_SCHEMA_VERSION = 1
+MEDICAL_SWARM_GRAPH_VERSION = "medical-swarm-v1"
+
+
 class MedicalSwarmGraph:
     """Executable LangGraph workflow for medical multi-agent processing."""
 
@@ -58,6 +69,7 @@ class MedicalSwarmGraph:
         swarm_timeout: float = 120.0,
         swarm_timeout_grace_s: float = 10.0,
         agent_catalog: Optional[AgentCatalog] = None,
+        checkpointer: Optional[Any] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.worker_pool = worker_pool
@@ -75,6 +87,8 @@ class MedicalSwarmGraph:
         self.enable_long_term_memory = enable_long_term_memory
         self.swarm_timeout = swarm_timeout
         self.swarm_timeout_grace_s = swarm_timeout_grace_s
+        self.checkpointer = checkpointer
+        self._runtime_collectors: Dict[str, DebugTraceCollector] = {}
 
         self._compiled_graph = self.build_graph()
 
@@ -110,11 +124,17 @@ class MedicalSwarmGraph:
         graph.add_edge("build_response", "save_memory")
         graph.add_edge("save_memory", END)
 
-        return graph.compile()
+        return graph.compile(checkpointer=self.checkpointer)
 
-    async def ainvoke(self, initial_state: Dict[str, Any]) -> MedicalSwarmState:
+    async def ainvoke(
+        self,
+        initial_state: Dict[str, Any],
+        *,
+        run_id: Optional[str] = None,
+    ) -> MedicalSwarmState:
         """Invoke the compiled graph with API-compatible defaults."""
         state: MedicalSwarmState = dict(initial_state)
+        collector = state.pop("debug_collector", None)
         start_time = state.get("start_time") or datetime.now()
         state["start_time"] = start_time
         state["context"] = state.get("context") or {}
@@ -124,7 +144,36 @@ class MedicalSwarmGraph:
                 f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
             )
 
-        collector = self._get_debug_collector(state)
+        state["run_id"] = (
+            run_id
+            or state.get("run_id")
+            or getattr(collector, "run_id", None)
+            or str(uuid.uuid4())
+        )
+        state["schema_version"] = MEDICAL_SWARM_STATE_SCHEMA_VERSION
+        state["graph_version"] = MEDICAL_SWARM_GRAPH_VERSION
+        runtime_collectors = getattr(self, "_runtime_collectors", None)
+        if runtime_collectors is None:
+            runtime_collectors = {}
+            self._runtime_collectors = runtime_collectors
+        async with claim_run(self.checkpointer, state["run_id"]):
+            return await self._invoke_claimed(state, collector, runtime_collectors)
+
+    async def _invoke_claimed(
+        self,
+        state: MedicalSwarmState,
+        collector: Optional[DebugTraceCollector],
+        runtime_collectors: Dict[str, DebugTraceCollector],
+    ) -> MedicalSwarmState:
+        if self.checkpointer is not None:
+            existing = await self.get_checkpoint(state["run_id"])
+            if existing is not None:
+                raise RunAlreadyExistsError(
+                    "Workflow run already exists; use resume(): "
+                    f"{state['run_id']}"
+                )
+        if collector:
+            runtime_collectors[state["run_id"]] = collector
         if collector:
             collector.update_run(
                 session_id=state["session_id"],
@@ -142,23 +191,100 @@ class MedicalSwarmGraph:
             )
 
         try:
-            final_state = await self._compiled_graph.ainvoke(state)
+            final_state = await self._compiled_graph.ainvoke(
+                state,
+                config=checkpoint_config(state["run_id"]),
+            )
         except Exception as exc:
             if collector:
                 collector.finish_failed(exc)
             raise
+        else:
+            if collector:
+                result = final_state.get("result") or {}
+                collector.finish_success(
+                    result_json=result,
+                    route=final_state.get("route") or final_state.get("mode"),
+                    final_answer=(
+                        result.get("answer") or final_state.get("final_answer", "")
+                    ),
+                    timeout=bool(final_state.get("timeout_occurred", False)),
+                )
+            return final_state
+        finally:
+            runtime_collectors.pop(state["run_id"], None)
 
-        collector = self._get_debug_collector(final_state) or collector
-        if collector:
-            result = final_state.get("result") or {}
-            collector.finish_success(
-                result_json=result,
-                route=final_state.get("route") or final_state.get("mode"),
-                final_answer=result.get("answer") or final_state.get("final_answer", ""),
-                timeout=bool(final_state.get("timeout_occurred", False)),
+    async def resume(
+        self,
+        run_id: str,
+        checkpoint_id: Optional[str] = None,
+    ) -> MedicalSwarmState:
+        """Resume a durable run from its latest or selected checkpoint."""
+        checkpoint = await self.get_checkpoint(run_id, checkpoint_id)
+        if checkpoint is None:
+            raise LookupError(f"Checkpoint run not found: {run_id}")
+        self._validate_checkpoint_compatibility(checkpoint)
+        async with claim_run(self.checkpointer, run_id):
+            return await self._compiled_graph.ainvoke(
+                None,
+                config=checkpoint_config(run_id, checkpoint_id),
             )
 
-        return final_state
+    async def get_checkpoint(
+        self,
+        run_id: str,
+        checkpoint_id: Optional[str] = None,
+    ) -> Optional[CheckpointSnapshot]:
+        """Read one checkpoint without exposing LangGraph internals."""
+        self._require_checkpointer()
+        snapshot = await self._compiled_graph.aget_state(
+            checkpoint_config(run_id, checkpoint_id)
+        )
+        if not snapshot.values:
+            return None
+        return CheckpointSnapshot.from_langgraph(snapshot)
+
+    async def list_checkpoints(
+        self,
+        run_id: str,
+        *,
+        limit: Optional[int] = None,
+    ) -> List[CheckpointSnapshot]:
+        """List newest-first checkpoint history for one run."""
+        self._require_checkpointer()
+        checkpoints = []
+        async for snapshot in self._compiled_graph.aget_state_history(
+            checkpoint_config(run_id)
+        ):
+            checkpoints.append(CheckpointSnapshot.from_langgraph(snapshot))
+            if limit is not None and len(checkpoints) >= limit:
+                break
+        return checkpoints
+
+    def _require_checkpointer(self) -> None:
+        if self.checkpointer is None:
+            raise CheckpointingDisabledError(
+                "MedicalSwarmGraph was compiled without a checkpointer"
+            )
+
+    @staticmethod
+    def _validate_checkpoint_compatibility(
+        checkpoint: CheckpointSnapshot,
+    ) -> None:
+        schema_version = checkpoint.values.get("schema_version")
+        graph_version = checkpoint.values.get("graph_version")
+        if schema_version != MEDICAL_SWARM_STATE_SCHEMA_VERSION:
+            raise ValueError(
+                "Checkpoint state schema is incompatible: "
+                f"expected {MEDICAL_SWARM_STATE_SCHEMA_VERSION}, "
+                f"got {schema_version!r}"
+            )
+        if graph_version != MEDICAL_SWARM_GRAPH_VERSION:
+            raise ValueError(
+                "Checkpoint graph version is incompatible: "
+                f"expected {MEDICAL_SWARM_GRAPH_VERSION!r}, "
+                f"got {graph_version!r}"
+            )
 
     async def load_memory(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Inject recent session history and similar historical cases."""
@@ -323,7 +449,7 @@ class MedicalSwarmGraph:
 
         logger.info(f"MedicalSwarmGraph planned {len(subtasks)} subtasks")
         return {
-            "route_plan": route_plan,
+            "route_plan": route_plan.model_dump(mode="json"),
             "assessment": assessment,
             "subtasks": subtasks,
         }
@@ -331,8 +457,8 @@ class MedicalSwarmGraph:
     async def route_by_subtasks(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Choose single-agent, swarm, or fallback route."""
         subtasks = state.get("subtasks") or []
-        route_plan = state.get("route_plan")
-        execution_mode = getattr(route_plan, "execution_mode", None)
+        route_plan = self._route_plan_from_state(state)
+        execution_mode = route_plan.execution_mode
 
         if execution_mode == ExecutionMode.SINGLE or (
             execution_mode is None and len(subtasks) == 1
@@ -458,7 +584,7 @@ class MedicalSwarmGraph:
             )
 
         return {
-            "shared_context": shared_context,
+            "shared_context": shared_context.to_checkpoint(),
             "final_answer": final_answer,
             "timeout_occurred": timeout_occurred,
             "effective_swarm_timeout_s": effective_swarm_timeout,
@@ -545,7 +671,7 @@ class MedicalSwarmGraph:
         try:
             mode = state.get("mode") or state.get("route") or "unknown"
             final_answer = (state.get("result") or {}).get("answer") or state.get("final_answer", "")
-            shared_context = state.get("shared_context")
+            shared_context = self._shared_context_from_state(state)
             collector = self._get_debug_collector(state)
 
             if not self.enable_short_term_memory and not self.enable_long_term_memory:
@@ -569,13 +695,18 @@ class MedicalSwarmGraph:
                         "disclaimer": result.get("disclaimer", ""),
                         "agents_involved": result.get("agents_involved", []),
                     }
-                    await self.short_term_memory.save_turn(
+                    saved = await self.short_term_memory.save_turn(
                         session_id=state["session_id"],
                         user_message=state["question"],
                         assistant_message=final_answer,
                         assistant_metadata=assistant_metadata,
+                        idempotency_key=(
+                            f"{state['run_id']}:save_memory"
+                            if state.get("run_id")
+                            else None
+                        ),
                     )
-                    short_term_saved = True
+                    short_term_saved = saved is not False
                     logger.info(
                         "Saved completed turn to short-term memory "
                         f"(session={state['session_id']})"
@@ -676,7 +807,7 @@ class MedicalSwarmGraph:
         final_answer = state.get("final_answer") or result.get("answer", "")
 
         if mode == "swarm":
-            shared_context = state.get("shared_context")
+            shared_context = self._shared_context_from_state(state)
             completed_agents = (
                 list(shared_context.agent_contributions.keys()) if shared_context else []
             )
@@ -738,8 +869,15 @@ class MedicalSwarmGraph:
                 "⚠️ 以上信息仅供参考，不能替代专业医生的诊断和治疗。如有疑虑，请及时就医。",
             )
 
-        route_plan = state.get("route_plan")
-        if isinstance(route_plan, RoutePlan):
+        route_plan_value = state.get("route_plan")
+        route_plan = (
+            route_plan_value
+            if isinstance(route_plan_value, RoutePlan)
+            else RoutePlan.model_validate(route_plan_value)
+            if isinstance(route_plan_value, dict)
+            else None
+        )
+        if route_plan:
             result["routing"] = {
                 "intents": [intent.value for intent in route_plan.intents],
                 "risk_level": route_plan.risk_level.value,
@@ -748,6 +886,7 @@ class MedicalSwarmGraph:
                 "source": route_plan.source.value,
             }
         result.setdefault("timeout_occurred", bool(state.get("timeout_occurred", False)))
+        result.setdefault("run_id", state.get("run_id"))
         result = await self._ensure_runtime_safety(state, result)
         return {"result": result}
 
@@ -818,7 +957,16 @@ class MedicalSwarmGraph:
         state: MedicalSwarmState,
     ) -> Optional[DebugTraceCollector]:
         collector = state.get("debug_collector")
-        return collector if isinstance(collector, DebugTraceCollector) else None
+        if isinstance(collector, DebugTraceCollector):
+            return collector
+        run_id = state.get("run_id")
+        runtime_collectors = getattr(self, "_runtime_collectors", {})
+        runtime_collector = runtime_collectors.get(run_id) if run_id else None
+        return (
+            runtime_collector
+            if isinstance(runtime_collector, DebugTraceCollector)
+            else None
+        )
 
     def _debug_state_snapshot(self, state: MedicalSwarmState) -> Dict[str, Any]:
         snapshot: Dict[str, Any] = {}
@@ -838,8 +986,8 @@ class MedicalSwarmGraph:
             if key in state:
                 snapshot[key] = state[key]
 
-        shared_context = state.get("shared_context")
-        if shared_context and hasattr(shared_context, "get_summary"):
+        shared_context = self._shared_context_from_state(state)
+        if shared_context:
             snapshot["shared_context"] = shared_context.get_summary()
         return snapshot
 
@@ -890,6 +1038,8 @@ class MedicalSwarmGraph:
         route_plan = state.get("route_plan")
         if isinstance(route_plan, RoutePlan):
             return route_plan
+        if isinstance(route_plan, dict):
+            return RoutePlan.model_validate(route_plan)
 
         legacy_tasks = []
         for index, task in enumerate(state.get("subtasks") or [], 1):
@@ -924,6 +1074,17 @@ class MedicalSwarmGraph:
             source=RouteSource.FALLBACK,
             reasons=["legacy assessment adapter"],
         )
+
+    @staticmethod
+    def _shared_context_from_state(
+        state: MedicalSwarmState,
+    ) -> Optional[SharedContext]:
+        value = state.get("shared_context")
+        if isinstance(value, SharedContext):
+            return value
+        if isinstance(value, dict):
+            return SharedContext.from_checkpoint(value)
+        return None
 
     def _effective_swarm_timeout(self, state: MedicalSwarmState) -> float:
         """Return the worker-execution timeout for this request."""
@@ -1204,7 +1365,7 @@ class MedicalSwarmGraph:
             state.get("result"),
         ]
 
-        shared_context = state.get("shared_context")
+        shared_context = self._shared_context_from_state(state)
         if shared_context:
             candidates.extend(contrib.result for contrib in shared_context.get_contributions())
 

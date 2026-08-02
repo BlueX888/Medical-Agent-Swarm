@@ -16,6 +16,7 @@ class FakeRedisShortTermMemoryAdapter:
         self.ttl_seconds = ttl_seconds
         self.max_messages = max_messages
         self._sessions = {}
+        self._idempotency_keys = set()
 
     async def load_messages(self, session_id, message_limit):
         self._purge_expired(session_id)
@@ -24,13 +25,18 @@ class FakeRedisShortTermMemoryAdapter:
             return []
         return copy.deepcopy(session["messages"][-message_limit:])
 
-    async def save_messages(self, session_id, messages):
+    async def save_messages(self, session_id, messages, idempotency_key=None):
+        if idempotency_key and idempotency_key in self._idempotency_keys:
+            return False
         self._purge_expired(session_id)
         session = self._sessions.get(session_id, {"messages": []})
         session["messages"].extend(copy.deepcopy(messages))
         session["messages"] = session["messages"][-self.max_messages :]
         session["expires_at"] = time.monotonic() + self.ttl_seconds
         self._sessions[session_id] = session
+        if idempotency_key:
+            self._idempotency_keys.add(idempotency_key)
+        return True
 
     async def clear_session(self, session_id):
         self._purge_expired(session_id)

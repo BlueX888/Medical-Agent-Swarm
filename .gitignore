@@ -27,6 +27,7 @@ wheels/
 
 # 虚拟环境
 venv/
+.venv/
 ENV/
 env/
 
@@ -59,6 +60,7 @@ memory/agents/
 # 本地数据库与向量库
 knowledge/data/*.db
 *.db
+.data/
 
 # Claude 本地设置
 .claude/settings.local.json

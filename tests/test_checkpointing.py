@@ -3,19 +3,33 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 import asyncio
+import multiprocessing
 
 import pytest
 from langgraph.graph import END, StateGraph
 
 from core.checkpointing import (
     CheckpointSettings,
+    CheckpointConfigurationError,
     RunAlreadyActiveError,
     RunAlreadyExistsError,
+    FileRunLeaseManager,
     open_checkpointer,
 )
+from core.audit import open_audit_store
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 from swarm.medical_swarm_state import MedicalSwarmState
 from swarm.shared_context import Contribution, SharedContext, SubTask
+
+
+def _hold_file_lease(directory: str, ready, release) -> None:
+    async def hold() -> None:
+        manager = FileRunLeaseManager(Path(directory))
+        async with manager.claim("cross-process-run"):
+            ready.set()
+            await asyncio.to_thread(release.wait)
+
+    asyncio.run(hold())
 
 
 class RecoveryProbeGraph(MedicalSwarmGraph):
@@ -73,6 +87,7 @@ async def test_runs_use_run_id_as_checkpoint_thread_not_session_id(tmp_path: Pat
     settings = CheckpointSettings(
         backend="sqlite",
         sqlite_path=tmp_path / "runs.sqlite3",
+        allow_plaintext=True,
     )
 
     async with open_checkpointer(settings) as checkpointer:
@@ -93,7 +108,11 @@ async def test_runs_use_run_id_as_checkpoint_thread_not_session_id(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_sqlite_checkpoint_resumes_after_graph_is_recreated(tmp_path: Path):
     database_path = tmp_path / "recovery.sqlite3"
-    settings = CheckpointSettings(backend="sqlite", sqlite_path=database_path)
+    settings = CheckpointSettings(
+        backend="sqlite",
+        sqlite_path=database_path,
+        allow_plaintext=True,
+    )
 
     async with open_checkpointer(settings) as checkpointer:
         graph = RecoveryProbeGraph(checkpointer, fail_once=True)
@@ -239,6 +258,82 @@ async def test_sqlite_checkpoint_can_encrypt_medical_state_at_rest(tmp_path: Pat
         checkpoint = await restarted_graph.get_checkpoint("encrypted-run")
         assert checkpoint is not None
         assert checkpoint.values["question"] == secret_question
+
+
+def test_durable_checkpoint_backend_fails_closed_without_encryption(tmp_path: Path):
+    with pytest.raises(CheckpointConfigurationError, match="CHECKPOINT_AES_KEY"):
+        CheckpointSettings(
+            backend="sqlite",
+            sqlite_path=tmp_path / "plaintext.sqlite3",
+        )
+
+
+@pytest.mark.asyncio
+async def test_audit_attempts_survive_restart_and_are_encrypted(tmp_path: Path):
+    settings = CheckpointSettings(
+        backend="sqlite",
+        sqlite_path=tmp_path / "checkpoints.sqlite3",
+        encryption_key="0123456789abcdef0123456789abcdef",
+    )
+    payload = {
+        "run": {"run_id": "audit-run", "started_at": "2026-08-02T00:00:00"},
+        "events": [{"name": "clinical-step", "output": "sensitive-audit-data"}],
+    }
+
+    async with open_audit_store(settings) as audit_store:
+        await audit_store.save_attempt("audit-run", "attempt-a", payload)
+
+    audit_path = tmp_path / "checkpoints-audit.sqlite3"
+    assert b"sensitive-audit-data" not in audit_path.read_bytes()
+
+    async with open_audit_store(settings) as audit_store:
+        attempts = await audit_store.get_attempts("audit-run")
+
+    assert attempts == [{"attempt_id": "attempt-a", **payload}]
+
+
+@pytest.mark.asyncio
+async def test_audit_effect_claim_survives_restart(tmp_path: Path):
+    settings = CheckpointSettings(
+        backend="sqlite",
+        sqlite_path=tmp_path / "checkpoints.sqlite3",
+        encryption_key="0123456789abcdef0123456789abcdef",
+    )
+
+    async with open_audit_store(settings) as audit_store:
+        assert await audit_store.claim_effect("run-a", "long_term_memory") is True
+        await audit_store.complete_effect("run-a", "long_term_memory", "completed")
+
+    async with open_audit_store(settings) as audit_store:
+        assert await audit_store.claim_effect("run-a", "long_term_memory") is False
+
+
+def test_sqlite_file_lease_excludes_another_process(tmp_path: Path):
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    process = context.Process(
+        target=_hold_file_lease,
+        args=(str(tmp_path), ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(timeout=10)
+        manager = FileRunLeaseManager(tmp_path)
+
+        async def contend() -> None:
+            with pytest.raises(RunAlreadyActiveError, match="cross-process-run"):
+                async with manager.claim("cross-process-run"):
+                    pass
+
+        asyncio.run(contend())
+    finally:
+        release.set()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+    assert process.exitcode == 0
 
 
 def test_shared_context_checkpoint_round_trip_is_primitive():

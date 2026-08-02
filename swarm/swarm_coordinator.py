@@ -5,6 +5,8 @@ The runtime workflow is executed by MedicalSwarmGraph. This class keeps the
 external API stable while wiring LLM, Worker Agents, memory, and the graph.
 """
 import asyncio
+import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +14,13 @@ from loguru import logger
 
 from agents import ConsultationAgent, DiagnosticAgent, ResearchAgent
 from core import LLMClient
+from core.checkpointing import (
+    CheckpointSettings,
+    RunLeaseManager,
+    open_checkpointer,
+    open_run_lease,
+)
+from core.audit import AuditStore, open_audit_store
 from core.observability import trace_async
 from debug import DebugTraceCollector, summarize_debug_run
 from memory import (
@@ -27,7 +36,6 @@ from .agent_catalog import AgentCatalog
 @dataclass
 class _LoopDefaults:
     init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    coordinator: Optional["SwarmCoordinator"] = None
     short_term_memory: Optional[ShortTermMemory] = None
 
 
@@ -56,6 +64,8 @@ class SwarmCoordinator:
         swarm_timeout_s: float = 120.0,
         short_term_memory: Optional[ShortTermMemory] = None,
         checkpointer: Optional[Any] = None,
+        run_lease: Optional[RunLeaseManager] = None,
+        audit_store: Optional[AuditStore] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
@@ -98,6 +108,8 @@ class SwarmCoordinator:
             swarm_timeout=self.swarm_timeout_s,
             agent_catalog=self.agent_catalog,
             checkpointer=checkpointer,
+            run_lease=run_lease,
+            audit_store=audit_store,
         )
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
@@ -197,6 +209,7 @@ class SwarmCoordinator:
         self,
         run_id: str,
         checkpoint_id: Optional[str] = None,
+        debug_collector: Optional[DebugTraceCollector] = None,
     ) -> Dict[str, Any]:
         """Resume a previously checkpointed workflow run."""
         checkpoint = await self.medical_graph.get_checkpoint(run_id, checkpoint_id)
@@ -206,7 +219,11 @@ class SwarmCoordinator:
         session_id = checkpoint.values.get("session_id")
 
         async def invoke_resume() -> Dict[str, Any]:
-            state = await self.medical_graph.resume(run_id, checkpoint_id)
+            state = await self.medical_graph.resume(
+                run_id,
+                checkpoint_id,
+                debug_collector=debug_collector,
+            )
             return state["result"]
 
         if self.enable_short_term_memory and session_id:
@@ -260,6 +277,7 @@ async def process_with_swarm(
     enable_short_term_memory: Optional[bool] = None,
     enable_long_term_memory: Optional[bool] = None,
     swarm_timeout_s: Optional[float] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Convenience function for processing a question through the swarm entry.
@@ -269,11 +287,13 @@ async def process_with_swarm(
         enable_short_term_memory,
         enable_long_term_memory,
     )
+    effective_run_id = run_id or str(uuid.uuid4())
     debug_collector = (
         DebugTraceCollector(
             question=question,
             context=context or {},
             session_id=session_id,
+            run_id=effective_run_id,
             metadata={
                 "source": "process_with_swarm",
                 "enable_swarm": enable_swarm,
@@ -288,40 +308,33 @@ async def process_with_swarm(
 
     defaults = _get_loop_defaults()
     async with defaults.init_lock:
-        # Reuse cached coordinator when called with default params.
-        if (
-            defaults.coordinator is not None
-            and defaults.coordinator.enable_swarm == enable_swarm
-            and defaults.coordinator.enable_short_term_memory == short_term_enabled
-            and defaults.coordinator.enable_long_term_memory == long_term_enabled
-        ):
-            coordinator = defaults.coordinator
-        else:
-            if defaults.short_term_memory is None:
-                defaults.short_term_memory = await create_short_term_memory()
-            coordinator = SwarmCoordinator(
-                enable_swarm=enable_swarm,
-                enable_memory=enable_memory,
-                enable_short_term_memory=short_term_enabled,
-                enable_long_term_memory=long_term_enabled,
-                short_term_memory=defaults.short_term_memory,
+        if defaults.short_term_memory is None:
+            defaults.short_term_memory = await create_short_term_memory()
+
+    async with _open_checkpointed_coordinator(
+        short_term_memory=defaults.short_term_memory,
+        enable_swarm=enable_swarm,
+        enable_memory=enable_memory,
+        enable_short_term_memory=short_term_enabled,
+        enable_long_term_memory=long_term_enabled,
+        swarm_timeout_s=swarm_timeout_s or 120.0,
+    ) as coordinator:
+        try:
+            result = await coordinator.process(
+                question,
+                context,
+                session_id=session_id,
+                debug_collector=debug_collector,
+                swarm_timeout_s=swarm_timeout_s,
+                run_id=effective_run_id,
             )
-            if enable_swarm and enable_memory:
-                defaults.coordinator = coordinator
+        except Exception as exc:
+            if debug_collector:
+                debug_collector.finish_failed(exc)
+            raise
 
-    try:
-        result = await coordinator.process(
-            question,
-            context,
-            session_id=session_id,
-            debug_collector=debug_collector,
-            swarm_timeout_s=swarm_timeout_s,
-        )
-    except Exception as exc:
-        if debug_collector:
-            debug_collector.finish_failed(exc)
-        raise
-
+    result = dict(result)
+    result.setdefault("run_id", effective_run_id)
     if debug_collector:
         return {
             "result": result,
@@ -330,6 +343,96 @@ async def process_with_swarm(
         }
 
     return result
+
+
+async def resume_with_swarm(
+    run_id: str,
+    checkpoint_id: Optional[str] = None,
+    *,
+    debug: bool = False,
+) -> Dict[str, Any]:
+    """Resume a run created by ``process_with_swarm`` or the HTTP API."""
+    defaults = _get_loop_defaults()
+    async with defaults.init_lock:
+        if defaults.short_term_memory is None:
+            defaults.short_term_memory = await create_short_term_memory()
+
+    async with _open_checkpointed_coordinator(
+        short_term_memory=defaults.short_term_memory,
+    ) as coordinator:
+        checkpoint = await coordinator.get_checkpoint(run_id, checkpoint_id)
+        if checkpoint is None:
+            raise LookupError(f"Checkpoint run not found: {run_id}")
+        values = checkpoint.values
+        coordinator.enable_swarm = bool(values.get("enable_swarm", True))
+        coordinator.enable_short_term_memory = bool(
+            values.get("enable_short_term_memory", True)
+        )
+        coordinator.enable_long_term_memory = bool(
+            values.get("enable_long_term_memory", True)
+        )
+        coordinator.medical_graph.enable_swarm = coordinator.enable_swarm
+        coordinator.medical_graph.enable_short_term_memory = (
+            coordinator.enable_short_term_memory
+        )
+        coordinator.medical_graph.enable_long_term_memory = (
+            coordinator.enable_long_term_memory
+        )
+        collector = (
+            DebugTraceCollector(
+                question=str(values.get("question") or ""),
+                context=dict(values.get("context") or {}),
+                session_id=values.get("session_id"),
+                run_id=run_id,
+                metadata={
+                    "source": "resume_with_swarm",
+                    "checkpoint_id": checkpoint_id or checkpoint.checkpoint_id,
+                },
+            )
+            if debug
+            else None
+        )
+        result = await coordinator.resume(
+            run_id,
+            checkpoint_id,
+            debug_collector=collector,
+        )
+
+    if collector:
+        return {
+            "result": result,
+            "debug_run": collector.get_run().to_dict(),
+            "debug_events": [event.to_dict() for event in collector.get_events()],
+        }
+    return result
+
+
+@asynccontextmanager
+async def _open_checkpointed_coordinator(
+    *,
+    short_term_memory: ShortTermMemory,
+    enable_swarm: bool = True,
+    enable_memory: bool = True,
+    enable_short_term_memory: Optional[bool] = None,
+    enable_long_term_memory: Optional[bool] = None,
+    swarm_timeout_s: float = 120.0,
+):
+    settings = CheckpointSettings.from_env()
+    async with AsyncExitStack() as stack:
+        checkpointer = await stack.enter_async_context(open_checkpointer(settings))
+        run_lease = await stack.enter_async_context(open_run_lease(settings))
+        audit_store = await stack.enter_async_context(open_audit_store(settings))
+        yield SwarmCoordinator(
+            enable_swarm=enable_swarm,
+            enable_memory=enable_memory,
+            enable_short_term_memory=enable_short_term_memory,
+            enable_long_term_memory=enable_long_term_memory,
+            swarm_timeout_s=swarm_timeout_s,
+            short_term_memory=short_term_memory,
+            checkpointer=checkpointer,
+            run_lease=run_lease,
+            audit_store=audit_store,
+        )
 
 
 def _resolve_memory_flags(

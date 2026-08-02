@@ -6,7 +6,7 @@ from .shared_context import SharedContext, SubTask, Contribution, TaskStatus
 from .events import Event, EventType
 from .medical_swarm_graph import MedicalSwarmGraph
 from .medical_swarm_state import MedicalSwarmState
-from .swarm_coordinator import SwarmCoordinator, process_with_swarm
+from .swarm_coordinator import SwarmCoordinator, process_with_swarm, resume_with_swarm
 from .agent_catalog import AgentCatalog
 from .orchestrator import Orchestrator
 from .routing_models import (
@@ -29,6 +29,7 @@ __all__ = [
     'MedicalSwarmState',
     'SwarmCoordinator',
     'process_with_swarm',
+    'resume_with_swarm',
     'AgentCatalog',
     'Orchestrator',
     'ExecutionMode',

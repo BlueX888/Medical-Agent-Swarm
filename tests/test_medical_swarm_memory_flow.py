@@ -7,6 +7,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from memory import ShortTermMemoryUnavailable
 from debug import DebugTraceCollector
 from core.checkpointing import CheckpointSnapshot
+from core.audit import MemoryAuditStore
 import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
 from swarm.swarm_coordinator import SwarmCoordinator
@@ -136,7 +137,7 @@ class ResumeProbe:
             status="pending",
         )
 
-    async def resume(self, run_id, checkpoint_id=None):
+    async def resume(self, run_id, checkpoint_id=None, **kwargs):
         self.resumed.append((run_id, checkpoint_id))
         return {"result": {"answer": "resumed", "run_id": run_id}}
 
@@ -288,6 +289,7 @@ def test_process_with_swarm_initializes_default_memory_once_per_event_loop(
             enable_short_term_memory,
             enable_long_term_memory,
             short_term_memory,
+            **kwargs,
         ):
             self.enable_swarm = enable_swarm
             self.enable_short_term_memory = enable_short_term_memory
@@ -350,6 +352,38 @@ async def test_graph_saves_exactly_one_user_visible_turn():
 
 
 @pytest.mark.asyncio
+async def test_graph_claims_non_transactional_long_term_write_once_per_run():
+    class RecordingLongTermMemory:
+        enabled = True
+
+        def __init__(self):
+            self.calls = []
+
+        def add_session_summary(self, **kwargs):
+            self.calls.append(kwargs)
+            return "memory-a"
+
+    graph = make_graph_for_memory_nodes()
+    graph.enable_long_term_memory = True
+    graph.long_term_memory = RecordingLongTermMemory()
+    graph.audit_store = MemoryAuditStore()
+    state = {
+        "session_id": "session-a",
+        "question": "current question",
+        "result": {"answer": "final answer"},
+        "start_time": datetime.now(),
+        "mode": "single_agent",
+        "run_id": "durable-run-a",
+    }
+
+    await graph.save_memory(state)
+    await graph.save_memory(state)
+
+    assert len(graph.long_term_memory.calls) == 1
+    assert graph.long_term_memory.calls[0]["metadata"]["run_id"] == "durable-run-a"
+
+
+@pytest.mark.asyncio
 async def test_full_swarm_workflow_persists_only_one_completed_turn(
     short_term_memory_factory,
 ):
@@ -394,6 +428,7 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
     consultation = FakeWorker("consultation_agent")
     diagnostic = FakeWorker("diagnostic_agent")
     checkpointer = InMemorySaver()
+    audit_store = MemoryAuditStore()
     graph = SwarmAcceptanceGraph(
         llm_client=object(),
         worker_pool=[consultation, diagnostic],
@@ -407,6 +442,7 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
         enable_short_term_memory=False,
         enable_long_term_memory=False,
         checkpointer=checkpointer,
+        audit_store=audit_store,
     )
     collector = DebugTraceCollector(
         question="需要多角度分析的问题",
@@ -432,3 +468,9 @@ async def test_debug_swarm_records_validated_tasks_without_crashing(
     assert checkpoint is not None
     assert "debug_collector" not in checkpoint.values
     assert isinstance(checkpoint.values["shared_context"], dict)
+    audit_attempts = await audit_store.get_attempts(collector.run_id)
+    assert audit_attempts[-1]["run"]["status"] == "success"
+    assert any(
+        event["name"] == "subtasks_created"
+        for event in audit_attempts[-1]["events"]
+    )

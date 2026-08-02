@@ -15,11 +15,13 @@ from langgraph.graph import END, StateGraph
 from loguru import logger
 
 from core import LLMClient
+from core.audit import AuditStore
 from core.checkpointing import (
     CheckpointSnapshot,
     CheckpointingDisabledError,
     RunAlreadyExistsError,
-    claim_run,
+    RunLeaseManager,
+    LocalRunLeaseManager,
     checkpoint_config,
 )
 from core.observability import trace_async
@@ -70,6 +72,8 @@ class MedicalSwarmGraph:
         swarm_timeout_grace_s: float = 10.0,
         agent_catalog: Optional[AgentCatalog] = None,
         checkpointer: Optional[Any] = None,
+        run_lease: Optional[RunLeaseManager] = None,
+        audit_store: Optional[AuditStore] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.worker_pool = worker_pool
@@ -88,6 +92,8 @@ class MedicalSwarmGraph:
         self.swarm_timeout = swarm_timeout
         self.swarm_timeout_grace_s = swarm_timeout_grace_s
         self.checkpointer = checkpointer
+        self.run_lease = run_lease or LocalRunLeaseManager()
+        self.audit_store = audit_store
         self._runtime_collectors: Dict[str, DebugTraceCollector] = {}
 
         self._compiled_graph = self.build_graph()
@@ -144,19 +150,31 @@ class MedicalSwarmGraph:
                 f"{start_time.strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8]}"
             )
 
-        state["run_id"] = (
+        candidate_run_id = (
             run_id
             or state.get("run_id")
             or getattr(collector, "run_id", None)
             or str(uuid.uuid4())
         )
+        state["run_id"] = checkpoint_config(candidate_run_id)["configurable"][
+            "thread_id"
+        ]
         state["schema_version"] = MEDICAL_SWARM_STATE_SCHEMA_VERSION
         state["graph_version"] = MEDICAL_SWARM_GRAPH_VERSION
+        if collector is None and getattr(self, "audit_store", None) is not None:
+            collector = DebugTraceCollector(
+                question=str(state.get("question") or ""),
+                context=dict(state.get("context") or {}),
+                session_id=state.get("session_id"),
+                run_id=state["run_id"],
+                metadata={"source": "durable_runtime"},
+            )
         runtime_collectors = getattr(self, "_runtime_collectors", None)
         if runtime_collectors is None:
             runtime_collectors = {}
             self._runtime_collectors = runtime_collectors
-        async with claim_run(self.checkpointer, state["run_id"]):
+        run_lease = getattr(self, "run_lease", None) or LocalRunLeaseManager()
+        async with run_lease.claim(state["run_id"]):
             return await self._invoke_claimed(state, collector, runtime_collectors)
 
     async def _invoke_claimed(
@@ -175,18 +193,19 @@ class MedicalSwarmGraph:
         if collector:
             runtime_collectors[state["run_id"]] = collector
         if collector:
+            collector_metadata = collector.get_run().metadata or {}
             collector.update_run(
                 session_id=state["session_id"],
                 question=state.get("question", ""),
                 context=state.get("context") or {},
                 metadata={
-                    **(collector.get_run().metadata or {}),
+                    **collector_metadata,
                     "enable_swarm": self.enable_swarm,
                     "enable_short_term_memory": self.enable_short_term_memory,
                     "enable_long_term_memory": self.enable_long_term_memory,
                     "swarm_timeout": self.swarm_timeout,
                     "worker_count": len(self.worker_pool),
-                    "source": "api",
+                    "source": collector_metadata.get("source") or "api",
                 },
             )
 
@@ -198,6 +217,7 @@ class MedicalSwarmGraph:
         except Exception as exc:
             if collector:
                 collector.finish_failed(exc)
+                await self._persist_audit(collector)
             raise
         else:
             if collector:
@@ -210,6 +230,7 @@ class MedicalSwarmGraph:
                     ),
                     timeout=bool(final_state.get("timeout_occurred", False)),
                 )
+                await self._persist_audit(collector)
             return final_state
         finally:
             runtime_collectors.pop(state["run_id"], None)
@@ -218,17 +239,55 @@ class MedicalSwarmGraph:
         self,
         run_id: str,
         checkpoint_id: Optional[str] = None,
+        debug_collector: Optional[DebugTraceCollector] = None,
     ) -> MedicalSwarmState:
         """Resume a durable run from its latest or selected checkpoint."""
         checkpoint = await self.get_checkpoint(run_id, checkpoint_id)
         if checkpoint is None:
             raise LookupError(f"Checkpoint run not found: {run_id}")
         self._validate_checkpoint_compatibility(checkpoint)
-        async with claim_run(self.checkpointer, run_id):
-            return await self._compiled_graph.ainvoke(
-                None,
-                config=checkpoint_config(run_id, checkpoint_id),
+        if debug_collector is None and getattr(self, "audit_store", None) is not None:
+            debug_collector = DebugTraceCollector(
+                question=str(checkpoint.values.get("question") or ""),
+                context=dict(checkpoint.values.get("context") or {}),
+                session_id=checkpoint.values.get("session_id"),
+                run_id=run_id,
+                metadata={
+                    "source": "durable_resume",
+                    "checkpoint_id": checkpoint_id or checkpoint.checkpoint_id,
+                },
             )
+        run_lease = getattr(self, "run_lease", None) or LocalRunLeaseManager()
+        runtime_collectors = getattr(self, "_runtime_collectors", None)
+        if runtime_collectors is None:
+            runtime_collectors = {}
+            self._runtime_collectors = runtime_collectors
+        async with run_lease.claim(run_id):
+            if debug_collector:
+                runtime_collectors[run_id] = debug_collector
+            try:
+                final_state = await self._compiled_graph.ainvoke(
+                    None,
+                    config=checkpoint_config(run_id, checkpoint_id),
+                )
+            except Exception as exc:
+                if debug_collector:
+                    debug_collector.finish_failed(exc)
+                    await self._persist_audit(debug_collector)
+                raise
+            else:
+                if debug_collector:
+                    result = final_state.get("result") or {}
+                    debug_collector.finish_success(
+                        result_json=result,
+                        route=final_state.get("route") or final_state.get("mode"),
+                        final_answer=result.get("answer", ""),
+                        timeout=bool(final_state.get("timeout_occurred", False)),
+                    )
+                    await self._persist_audit(debug_collector)
+                return final_state
+            finally:
+                runtime_collectors.pop(run_id, None)
 
     async def get_checkpoint(
         self,
@@ -707,10 +766,16 @@ class MedicalSwarmGraph:
                         ),
                     )
                     short_term_saved = saved is not False
-                    logger.info(
-                        "Saved completed turn to short-term memory "
-                        f"(session={state['session_id']})"
-                    )
+                    if short_term_saved:
+                        logger.info(
+                            "Saved completed turn to short-term memory "
+                            f"(session={state['session_id']})"
+                        )
+                    else:
+                        logger.info(
+                            "Skipped duplicate short-term memory write "
+                            f"(run={state.get('run_id')})"
+                        )
                 except Exception as exc:
                     short_term_error = str(exc)
                     logger.error(f"Failed to save to short-term memory: {exc}")
@@ -718,50 +783,67 @@ class MedicalSwarmGraph:
             summary_saved = False
             if self.enable_long_term_memory and mode == "swarm" and shared_context:
                 try:
-                    summary = SessionSummary.from_shared_context(
-                        session_id=state["session_id"],
-                        question=state["question"],
-                        shared_context=shared_context,
-                        final_answer=final_answer,
-                        start_time=state["start_time"],
-                        end_time=end_time,
-                    )
-                    self.session_manager.save_summary(summary)
-                    summary_saved = True
+                    if await self._claim_memory_effect(state, "session_summary"):
+                        summary = SessionSummary.from_shared_context(
+                            session_id=state["session_id"],
+                            question=state["question"],
+                            shared_context=shared_context,
+                            final_answer=final_answer,
+                            start_time=state["start_time"],
+                            end_time=end_time,
+                        )
+                        self.session_manager.save_summary(summary)
+                        summary_saved = True
+                        await self._complete_memory_effect(
+                            state, "session_summary", "completed"
+                        )
                 except Exception as exc:
+                    await self._complete_memory_effect(
+                        state, "session_summary", "failed"
+                    )
                     logger.error(f"Failed to generate session summary: {exc}")
 
             long_term_saved = False
             long_term_error = None
             if self.enable_long_term_memory:
                 try:
-                    metadata = {
-                        "mode": mode,
-                        "total_time": (end_time - state["start_time"]).total_seconds(),
-                    }
-                    if mode == "swarm" and shared_context:
-                        metadata.update(
-                            {
-                                "agents_count": len(shared_context.agent_contributions),
-                                "timeout_occurred": state.get("timeout_occurred", False),
-                            }
-                        )
-                    else:
-                        metadata["subtasks_count"] = len(state.get("subtasks") or [])
+                    if await self._claim_memory_effect(state, "long_term_memory"):
+                        metadata = {
+                            "mode": mode,
+                            "run_id": state.get("run_id"),
+                            "total_time": (end_time - state["start_time"]).total_seconds(),
+                        }
+                        if mode == "swarm" and shared_context:
+                            metadata.update(
+                                {
+                                    "agents_count": len(shared_context.agent_contributions),
+                                    "timeout_occurred": state.get("timeout_occurred", False),
+                                }
+                            )
+                        else:
+                            metadata["subtasks_count"] = len(state.get("subtasks") or [])
 
-                    memory_id = self.long_term_memory.add_session_summary(
-                        session_id=state["session_id"],
-                        question=state["question"],
-                        answer=final_answer,
-                        metadata=metadata,
-                    )
-                    long_term_saved = bool(memory_id)
-                    logger.info(
-                        f"Processed long-term memory save "
-                        f"(session={state['session_id']}, mode={mode})"
-                    )
+                        memory_id = self.long_term_memory.add_session_summary(
+                            session_id=state["session_id"],
+                            question=state["question"],
+                            answer=final_answer,
+                            metadata=metadata,
+                        )
+                        long_term_saved = bool(memory_id)
+                        await self._complete_memory_effect(
+                            state,
+                            "long_term_memory",
+                            "completed" if long_term_saved else "failed",
+                        )
+                        logger.info(
+                            f"Processed long-term memory save "
+                            f"(session={state['session_id']}, mode={mode})"
+                        )
                 except Exception as exc:
                     long_term_error = str(exc)
+                    await self._complete_memory_effect(
+                        state, "long_term_memory", "failed"
+                    )
                     logger.error(f"Failed to save to long-term memory: {exc}")
 
             if collector:
@@ -799,6 +881,29 @@ class MedicalSwarmGraph:
             logger.error(f"save_memory failed (non-critical, response already built): {exc}")
 
         return {"end_time": end_time}
+
+    async def _claim_memory_effect(
+        self,
+        state: MedicalSwarmState,
+        effect_name: str,
+    ) -> bool:
+        """Claim a non-transactional memory write once for a durable run."""
+        run_id = state.get("run_id")
+        audit_store = getattr(self, "audit_store", None)
+        if not run_id or audit_store is None:
+            return True
+        return await audit_store.claim_effect(run_id, effect_name)
+
+    async def _complete_memory_effect(
+        self,
+        state: MedicalSwarmState,
+        effect_name: str,
+        status: str,
+    ) -> None:
+        run_id = state.get("run_id")
+        audit_store = getattr(self, "audit_store", None)
+        if run_id and audit_store is not None:
+            await audit_store.complete_effect(run_id, effect_name, status)
 
     async def build_response(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Build the API-compatible final result."""
@@ -915,42 +1020,58 @@ class MedicalSwarmGraph:
                     timer.finish(status="failed", error=str(exc), output={"error": str(exc)})
                     raise
 
-            return await trace_async(
-                name=f"graph.{name}",
-                run_type="chain",
-                func=execute_node,
-                inputs={
-                    "state": self._debug_state_snapshot(state),
-                    "state_keys": sorted(
-                        key for key in state if key != "debug_collector"
-                    ),
-                    "state_key_count": len(
-                        [key for key in state if key != "debug_collector"]
-                    ),
-                },
-                metadata={
-                    "stage": stage,
-                    "graph_node": name,
-                    "session_id": state.get("session_id"),
-                    "route": state.get("route") or state.get("mode"),
-                    "run_id": getattr(
-                        self._get_debug_collector(state),
-                        "run_id",
-                        None,
-                    ),
-                    "status": "success",
-                },
-                tags=["medical-agent-swarm", "langgraph-node", stage],
-                output_mapper=lambda output: {
-                    "status": "success",
-                    "output_keys": sorted(output.keys())
-                    if isinstance(output, dict)
-                    else [],
-                    "node_output": output,
-                },
-            )
+            try:
+                return await trace_async(
+                    name=f"graph.{name}",
+                    run_type="chain",
+                    func=execute_node,
+                    inputs={
+                        "state": self._debug_state_snapshot(state),
+                        "state_keys": sorted(
+                            key for key in state if key != "debug_collector"
+                        ),
+                        "state_key_count": len(
+                            [key for key in state if key != "debug_collector"]
+                        ),
+                    },
+                    metadata={
+                        "stage": stage,
+                        "graph_node": name,
+                        "session_id": state.get("session_id"),
+                        "route": state.get("route") or state.get("mode"),
+                        "run_id": state.get("run_id"),
+                        "status": "success",
+                    },
+                    tags=["medical-agent-swarm", "langgraph-node", stage],
+                    output_mapper=lambda output: {
+                        "status": "success",
+                        "output_keys": sorted(output.keys())
+                        if isinstance(output, dict)
+                        else [],
+                        "node_output": output,
+                    },
+                )
+            finally:
+                collector = self._get_debug_collector(state)
+                if collector:
+                    await self._persist_audit(collector)
 
         return wrapped
+
+    async def _persist_audit(self, collector: DebugTraceCollector) -> None:
+        audit_store = getattr(self, "audit_store", None)
+        if audit_store is None:
+            return
+        run = collector.get_run()
+        attempt_id = str(
+            (run.metadata or {}).get("audit_attempt_id")
+            or run.started_at.isoformat()
+        )
+        await audit_store.save_attempt(
+            collector.run_id,
+            attempt_id,
+            collector.to_dict(),
+        )
 
     def _get_debug_collector(
         self,

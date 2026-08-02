@@ -7,11 +7,20 @@ selects and initializes concrete adapters.
 from __future__ import annotations
 
 import os
+import hashlib
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import (
+    Any,
+    AsyncContextManager,
+    AsyncIterator,
+    BinaryIO,
+    Dict,
+    Optional,
+    Protocol,
+)
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
@@ -37,14 +46,79 @@ _ACTIVE_RUNS: set[str] = set()
 _ACTIVE_RUNS_GUARD = threading.Lock()
 
 
+class RunLeaseManager(Protocol):
+    """Cross-worker ownership seam for workflow runs."""
+
+    def claim(self, run_id: str) -> AsyncContextManager[None]: ...
+
+
+class LocalRunLeaseManager:
+    """Process-local lease used for memory and disabled backends."""
+
+    def claim(self, run_id: str) -> AsyncContextManager[None]:
+        return claim_run(run_id)
+
+
+class FileRunLeaseManager:
+    """OS-backed run lease shared by processes using one SQLite file."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    @asynccontextmanager
+    async def claim(self, run_id: str) -> AsyncIterator[None]:
+        async with claim_run(run_id):
+            digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+            path = self.directory / f"{digest}.lock"
+            lock_file = path.open("a+b")
+            locked = False
+            try:
+                _lock_file(lock_file, run_id)
+                locked = True
+                yield
+            finally:
+                if locked:
+                    _unlock_file(lock_file)
+                lock_file.close()
+
+
+class PostgresRunLeaseManager:
+    """PostgreSQL advisory lease held on a dedicated owned connection."""
+
+    def __init__(self, connection: Any):
+        self.connection = connection
+
+    @asynccontextmanager
+    async def claim(self, run_id: str) -> AsyncIterator[None]:
+        async with claim_run(run_id):
+            cursor = await self.connection.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                (run_id,),
+            )
+            row = await cursor.fetchone()
+            if not row or not bool(row[0]):
+                raise RunAlreadyActiveError(
+                    f"Workflow run is already active: {run_id}"
+                )
+            try:
+                yield
+            finally:
+                await self.connection.execute(
+                    "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                    (run_id,),
+                )
+
+
 @dataclass(frozen=True)
 class CheckpointSettings:
     """Storage selection for workflow checkpoints."""
 
-    backend: str = "sqlite"
+    backend: str = "memory"
     sqlite_path: Path = Path(".data/checkpoints.sqlite3")
     postgres_dsn: Optional[str] = None
     encryption_key: Optional[str] = None
+    allow_plaintext: bool = False
 
     def __post_init__(self) -> None:
         backend = self.backend.strip().lower()
@@ -67,16 +141,27 @@ class CheckpointSettings:
             raise CheckpointConfigurationError(
                 "CHECKPOINT_AES_KEY must encode to 16, 24, or 32 bytes"
             )
+        if (
+            backend in {"sqlite", "postgres"}
+            and not self.encryption_key
+            and not self.allow_plaintext
+        ):
+            raise CheckpointConfigurationError(
+                "Durable checkpoints may contain medical data. Set "
+                "CHECKPOINT_AES_KEY, or explicitly opt into plaintext with "
+                "CHECKPOINT_ALLOW_PLAINTEXT=true for local development."
+            )
 
     @classmethod
     def from_env(cls) -> "CheckpointSettings":
         return cls(
-            backend=os.getenv("CHECKPOINT_BACKEND", "sqlite"),
+            backend=os.getenv("CHECKPOINT_BACKEND", "memory"),
             sqlite_path=Path(
                 os.getenv("CHECKPOINT_SQLITE_PATH", ".data/checkpoints.sqlite3")
             ),
             postgres_dsn=os.getenv("CHECKPOINT_POSTGRES_DSN"),
             encryption_key=os.getenv("CHECKPOINT_AES_KEY"),
+            allow_plaintext=_boolean_env("CHECKPOINT_ALLOW_PLAINTEXT", False),
         )
 
 
@@ -139,10 +224,11 @@ def checkpoint_config(
 
 @asynccontextmanager
 async def claim_run(
-    checkpointer: Optional[BaseCheckpointSaver[Any]],
     run_id: str,
 ) -> AsyncIterator[None]:
-    """Claim one run locally and, for PostgreSQL, across processes."""
+    """Claim one run within the current process."""
+    if not isinstance(run_id, str) or not run_id.strip():
+        raise ValueError("run_id must be a non-empty string")
     normalized_run_id = run_id.strip()
     with _ACTIVE_RUNS_GUARD:
         if normalized_run_id in _ACTIVE_RUNS:
@@ -151,60 +237,67 @@ async def claim_run(
             )
         _ACTIVE_RUNS.add(normalized_run_id)
 
-    postgres_claimed = False
     try:
-        if _is_postgres_saver(checkpointer):
-            postgres_claimed = await _try_postgres_advisory_lock(
-                checkpointer,
-                normalized_run_id,
-            )
-            if not postgres_claimed:
-                raise RunAlreadyActiveError(
-                    f"Workflow run is already active: {normalized_run_id}"
-                )
         yield
     finally:
-        try:
-            if postgres_claimed:
-                await _release_postgres_advisory_lock(
-                    checkpointer,
-                    normalized_run_id,
-                )
-        finally:
-            with _ACTIVE_RUNS_GUARD:
-                _ACTIVE_RUNS.discard(normalized_run_id)
+        with _ACTIVE_RUNS_GUARD:
+            _ACTIVE_RUNS.discard(normalized_run_id)
 
 
-def _is_postgres_saver(checkpointer: Optional[BaseCheckpointSaver[Any]]) -> bool:
-    if checkpointer is None:
-        return False
-    return checkpointer.__class__.__module__.startswith(
-        "langgraph.checkpoint.postgres"
-    )
+def _lock_file(lock_file: BinaryIO, run_id: str) -> None:
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    lock_file.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        raise RunAlreadyActiveError(
+            f"Workflow run is already active: {run_id}"
+        ) from exc
 
 
-async def _try_postgres_advisory_lock(
-    checkpointer: Any,
-    run_id: str,
-) -> bool:
-    cursor = await checkpointer.conn.execute(
-        "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS acquired",
-        (run_id,),
-    )
-    row = await cursor.fetchone()
-    if isinstance(row, dict):
-        return bool(row.get("acquired"))
-    return bool(row and row[0])
+def _unlock_file(lock_file: BinaryIO) -> None:
+    lock_file.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
-async def _release_postgres_advisory_lock(
-    checkpointer: Any,
-    run_id: str,
-) -> None:
-    await checkpointer.conn.execute(
-        "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
-        (run_id,),
-    )
+@asynccontextmanager
+async def open_run_lease(
+    settings: Optional[CheckpointSettings] = None,
+) -> AsyncIterator[RunLeaseManager]:
+    settings = settings or CheckpointSettings.from_env()
+    if settings.backend == "sqlite":
+        database_path = settings.sqlite_path.expanduser().resolve()
+        yield FileRunLeaseManager(database_path.parent / ".run-leases")
+        return
+    if settings.backend == "postgres":
+        from psycopg import AsyncConnection
+
+        assert settings.postgres_dsn is not None
+        async with await AsyncConnection.connect(
+            settings.postgres_dsn,
+            autocommit=True,
+            prepare_threshold=0,
+        ) as connection:
+            yield PostgresRunLeaseManager(connection)
+        return
+    yield LocalRunLeaseManager()
 
 
 @asynccontextmanager
@@ -213,7 +306,7 @@ async def open_checkpointer(
 ) -> AsyncIterator[Optional[BaseCheckpointSaver[Any]]]:
     """Open and initialize the configured LangGraph saver."""
     settings = settings or CheckpointSettings.from_env()
-    serializer = _checkpoint_serializer(settings)
+    serializer = checkpoint_serializer(settings)
 
     if settings.backend == "disabled":
         yield None
@@ -256,7 +349,7 @@ async def open_checkpointer(
         yield saver
 
 
-def _checkpoint_serializer(settings: CheckpointSettings):
+def checkpoint_serializer(settings: CheckpointSettings):
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     serializer = JsonPlusSerializer(pickle_fallback=False)
@@ -274,3 +367,17 @@ def _checkpoint_serializer(settings: CheckpointSettings):
         raise CheckpointConfigurationError(
             "Encrypted checkpointing requires pycryptodome"
         ) from exc
+
+
+def _boolean_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise CheckpointConfigurationError(
+        f"{name} must be true or false, got {value!r}"
+    )

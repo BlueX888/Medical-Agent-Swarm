@@ -26,6 +26,10 @@ except ImportError:
     logger.info("mem0ai not installed. Optional long-term memory is disabled.")
 
 
+class LongTermMemoryWriteUnknown(RuntimeError):
+    """The provider may have committed a write before the client failed."""
+
+
 class LongTermMemory:
     """
     长期记忆管理器（基于 Mem0）
@@ -132,7 +136,9 @@ class LongTermMemory:
 
         except Exception as e:
             logger.error(f"Failed to add session summary to Mem0: {e}")
-            return None
+            raise LongTermMemoryWriteUnknown(
+                "Mem0 write outcome is unknown and requires reconciliation"
+            ) from e
 
     def search_similar_sessions(
         self,
@@ -193,4 +199,3 @@ class LongTermMemory:
         except Exception as e:
             logger.error(f"Failed to search similar sessions: {e}")
             return []
-

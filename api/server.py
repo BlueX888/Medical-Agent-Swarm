@@ -34,6 +34,7 @@ from .schemas import (
     AgentInfo,
     DebugEventsResponse,
     DebugRunResponse,
+    EffectReconcileRequest,
     MemoryClearResponse,
     MemoryResponse,
     RunCreateRequest,
@@ -166,6 +167,32 @@ async def list_run_effects(request: Request, run_id: str) -> Dict[str, Any]:
     return {
         "run_id": run_id,
         "effects": await _audit_store(request).get_effects(run_id),
+    }
+
+
+@app.patch("/api/runs/{run_id}/effects/{effect_name}")
+async def reconcile_run_effect(
+    request: Request,
+    run_id: str,
+    effect_name: str,
+    payload: EffectReconcileRequest,
+) -> Dict[str, Any]:
+    """Record an administrator's reconciliation of an uncertain write."""
+    _require_checkpoint_admin(request)
+    reconciled = await _audit_store(request).reconcile_effect(
+        run_id,
+        effect_name,
+        payload.resolution,
+    )
+    if not reconciled:
+        raise HTTPException(
+            status_code=409,
+            detail="Effect is missing or is not awaiting reconciliation",
+        )
+    return {
+        "run_id": run_id,
+        "effect_name": effect_name,
+        "status": payload.resolution,
     }
 
 

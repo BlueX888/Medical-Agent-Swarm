@@ -28,6 +28,7 @@ from core.observability import trace_async
 from debug import DebugTraceCollector
 from memory import (
     LongTermMemory,
+    LongTermMemoryWriteUnknown,
     SessionSummary,
     SessionSummaryManager,
     ShortTermMemory,
@@ -851,6 +852,12 @@ class MedicalSwarmGraph:
                             f"Processed long-term memory save "
                             f"(session={state['session_id']}, mode={mode})"
                         )
+                except LongTermMemoryWriteUnknown as exc:
+                    long_term_error = str(exc)
+                    await self._complete_memory_effect(
+                        state, "long_term_memory", "unknown"
+                    )
+                    logger.error(f"Long-term memory outcome is unknown: {exc}")
                 except Exception as exc:
                     long_term_error = str(exc)
                     await self._complete_memory_effect(

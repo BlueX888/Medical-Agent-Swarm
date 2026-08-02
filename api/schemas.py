@@ -1,5 +1,5 @@
 """FastAPI request and response schemas for the debug console."""
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,10 @@ class RunCreateResponse(BaseModel):
 
 class RunResumeRequest(BaseModel):
     checkpoint_id: Optional[str] = None
+
+
+class EffectReconcileRequest(BaseModel):
+    resolution: Literal["completed", "failed"]
 
 
 class DebugRunResponse(BaseModel):

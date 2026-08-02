@@ -35,6 +35,10 @@ class AuditStore(Protocol):
 
     async def get_effects(self, run_id: str) -> List[Dict[str, Any]]: ...
 
+    async def reconcile_effect(
+        self, run_id: str, effect_name: str, resolution: str
+    ) -> bool: ...
+
 
 class MemoryAuditStore:
     def __init__(self):
@@ -102,6 +106,17 @@ class MemoryAuditStore:
             for (stored_run_id, effect_name), (status, updated_at) in self._effects.items()
             if stored_run_id == run_id
         ]
+
+    async def reconcile_effect(
+        self, run_id: str, effect_name: str, resolution: str
+    ) -> bool:
+        _validate_reconciliation(resolution)
+        key = (run_id, effect_name)
+        current = self._effects.get(key)
+        if current is None or current[0] != "unknown":
+            return False
+        self._effects[key] = (resolution, datetime.now(timezone.utc))
+        return True
 
 
 class SqliteAuditStore:
@@ -252,6 +267,27 @@ class SqliteAuditStore:
             for row in rows
         ]
 
+    async def reconcile_effect(
+        self, run_id: str, effect_name: str, resolution: str
+    ) -> bool:
+        _validate_reconciliation(resolution)
+        cursor = await self.connection.execute(
+            """
+            UPDATE workflow_effects SET status = ?, updated_at = ?
+            WHERE run_id = ? AND effect_name = ? AND status = 'unknown'
+            RETURNING status
+            """,
+            (
+                resolution,
+                datetime.now(timezone.utc).isoformat(),
+                run_id,
+                effect_name,
+            ),
+        )
+        row = await cursor.fetchone()
+        await self.connection.commit()
+        return row is not None
+
 
 class PostgresAuditStore:
     def __init__(self, connection: Any, serializer: Any):
@@ -389,10 +425,29 @@ class PostgresAuditStore:
             for row in rows
         ]
 
+    async def reconcile_effect(
+        self, run_id: str, effect_name: str, resolution: str
+    ) -> bool:
+        _validate_reconciliation(resolution)
+        cursor = await self.connection.execute(
+            """
+            UPDATE workflow_effects SET status = %s, updated_at = NOW()
+            WHERE run_id = %s AND effect_name = %s AND status = 'unknown'
+            RETURNING status
+            """,
+            (resolution, run_id, effect_name),
+        )
+        return await cursor.fetchone() is not None
+
 
 def _validate_effect_status(status: str) -> None:
-    if status not in {"completed", "failed"}:
-        raise ValueError("effect status must be 'completed' or 'failed'")
+    if status not in {"completed", "failed", "unknown"}:
+        raise ValueError("effect status must be completed, failed, or unknown")
+
+
+def _validate_reconciliation(resolution: str) -> None:
+    if resolution not in {"completed", "failed"}:
+        raise ValueError("reconciliation must resolve to completed or failed")
 
 
 @asynccontextmanager

@@ -262,6 +262,16 @@ def test_debug_api_reads_durable_audit_only_for_admin(monkeypatch):
                 collector.to_dict(),
             )
         )
+        asyncio.run(
+            server.app.state.audit_store.claim_effect(
+                "durable-audit-fallback", "long_term_memory"
+            )
+        )
+        asyncio.run(
+            server.app.state.audit_store.complete_effect(
+                "durable-audit-fallback", "long_term_memory", "unknown"
+            )
+        )
 
         forbidden_list = client.get("/api/runs")
         forbidden = client.get("/api/runs/durable-audit-run/events")
@@ -273,12 +283,19 @@ def test_debug_api_reads_durable_audit_only_for_admin(monkeypatch):
             "/api/runs/durable-audit-fallback/effects",
             headers={"X-Checkpoint-Admin-Token": "test-admin-token"},
         )
+        reconciled = client.patch(
+            "/api/runs/durable-audit-fallback/effects/long_term_memory",
+            json={"resolution": "completed"},
+            headers={"X-Checkpoint-Admin-Token": "test-admin-token"},
+        )
 
     assert forbidden_list.status_code == 403
     assert forbidden.status_code == 403
     assert allowed.status_code == 200
     assert effects.status_code == 200
-    assert effects.json()["effects"] == []
+    assert effects.json()["effects"][0]["status"] == "unknown"
+    assert reconciled.status_code == 200
+    assert reconciled.json()["status"] == "completed"
     assert allowed.json()["events"][0]["metadata"]["audit_attempt_id"] == "attempt-a"
 
 

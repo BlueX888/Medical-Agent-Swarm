@@ -18,7 +18,8 @@ from .short_term import (
     create_short_term_memory,
 )
 from .long_term import (
-    LongTermMemory
+    LongTermMemory,
+    LongTermMemoryWriteUnknown,
 )
 from .evidence_cache import (
     EvidenceMemory
@@ -45,6 +46,7 @@ __all__ = [
     'MemoryMessage',
     'create_short_term_memory',
     'LongTermMemory',
+    'LongTermMemoryWriteUnknown',
     'EvidenceMemory',
     # 本地持久化类
     'SessionSummary',

@@ -5,7 +5,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, StateGraph
 
-from memory import ShortTermMemoryUnavailable
+from memory import LongTermMemoryWriteUnknown, ShortTermMemoryUnavailable
 from debug import DebugTraceCollector
 from core.checkpointing import CheckpointSnapshot
 from core.audit import MemoryAuditStore
@@ -459,6 +459,40 @@ async def test_checkpoint_keeps_failed_effect_node_resumable():
     completed_snapshot = await compiled.aget_state(config)
     assert completed_snapshot.next == ()
     assert node_owner.long_term_memory.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_provider_outcome_is_not_automatically_retried():
+    class UncertainLongTermMemory:
+        enabled = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def add_session_summary(self, **kwargs):
+            self.calls += 1
+            raise LongTermMemoryWriteUnknown("response was lost")
+
+    graph = make_graph_for_memory_nodes()
+    graph.enable_long_term_memory = True
+    graph.long_term_memory = UncertainLongTermMemory()
+    graph.audit_store = MemoryAuditStore()
+    state = {
+        "session_id": "session-a",
+        "question": "current question",
+        "result": {"answer": "final answer"},
+        "start_time": datetime.now(),
+        "mode": "single_agent",
+        "run_id": "unknown-run-a",
+    }
+
+    with pytest.raises(RuntimeError, match="response was lost"):
+        await graph.save_memory(state)
+    await graph.save_memory(state)
+
+    assert graph.long_term_memory.calls == 1
+    effects = await graph.audit_store.get_effects("unknown-run-a")
+    assert effects[0]["status"] == "unknown"
 
 
 @pytest.mark.asyncio

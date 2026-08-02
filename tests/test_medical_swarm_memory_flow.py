@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, StateGraph
 
 from memory import ShortTermMemoryUnavailable
 from debug import DebugTraceCollector
@@ -10,6 +11,7 @@ from core.checkpointing import CheckpointSnapshot
 from core.audit import MemoryAuditStore
 import swarm.swarm_coordinator as coordinator_module
 from swarm.medical_swarm_graph import MedicalSwarmGraph
+from swarm.medical_swarm_state import MedicalSwarmState
 from swarm.swarm_coordinator import SwarmCoordinator
 
 
@@ -408,10 +410,55 @@ async def test_graph_retries_failed_long_term_outbox_effect():
         "run_id": "retry-run-a",
     }
 
-    await graph.save_memory(state)
+    with pytest.raises(RuntimeError, match="provider rejected"):
+        await graph.save_memory(state)
     await graph.save_memory(state)
 
     assert graph.long_term_memory.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_keeps_failed_effect_node_resumable():
+    class FlakyLongTermMemory:
+        enabled = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def add_session_summary(self, **kwargs):
+            self.calls += 1
+            return None if self.calls == 1 else "memory-a"
+
+    node_owner = make_graph_for_memory_nodes()
+    node_owner.enable_short_term_memory = False
+    node_owner.enable_long_term_memory = True
+    node_owner.long_term_memory = FlakyLongTermMemory()
+    node_owner.audit_store = MemoryAuditStore()
+    saver = InMemorySaver()
+    state_graph = StateGraph(MedicalSwarmState)
+    state_graph.add_node("save_memory", node_owner.save_memory)
+    state_graph.set_entry_point("save_memory")
+    state_graph.add_edge("save_memory", END)
+    compiled = state_graph.compile(checkpointer=saver)
+    config = {"configurable": {"thread_id": "effect-recovery-run"}}
+    state = {
+        "session_id": "session-a",
+        "question": "current question",
+        "result": {"answer": "final answer"},
+        "start_time": datetime.now(),
+        "mode": "single_agent",
+        "run_id": "effect-recovery-run",
+    }
+
+    with pytest.raises(RuntimeError, match="provider rejected"):
+        await compiled.ainvoke(state, config=config)
+    failed_snapshot = await compiled.aget_state(config)
+    assert failed_snapshot.next == ("save_memory",)
+
+    await compiled.ainvoke(None, config=config)
+    completed_snapshot = await compiled.aget_state(config)
+    assert completed_snapshot.next == ()
+    assert node_owner.long_term_memory.calls == 2
 
 
 @pytest.mark.asyncio

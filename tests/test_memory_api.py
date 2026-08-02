@@ -269,10 +269,16 @@ def test_debug_api_reads_durable_audit_only_for_admin(monkeypatch):
             "/api/runs/durable-audit-fallback/events",
             headers={"X-Checkpoint-Admin-Token": "test-admin-token"},
         )
+        effects = client.get(
+            "/api/runs/durable-audit-fallback/effects",
+            headers={"X-Checkpoint-Admin-Token": "test-admin-token"},
+        )
 
     assert forbidden_list.status_code == 403
     assert forbidden.status_code == 403
     assert allowed.status_code == 200
+    assert effects.status_code == 200
+    assert effects.json()["effects"] == []
     assert allowed.json()["events"][0]["metadata"]["audit_attempt_id"] == "attempt-a"
 
 

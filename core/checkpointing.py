@@ -398,19 +398,25 @@ def _load_or_create_local_key(path: Path) -> str:
         key = key_path.read_text(encoding="ascii").strip()
     except FileNotFoundError:
         key = secrets.token_hex(16)
+        temporary_path = key_path.with_name(
+            f".{key_path.name}.{secrets.token_hex(8)}.tmp"
+        )
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
         try:
-            descriptor = os.open(
-                key_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            key = key_path.read_text(encoding="ascii").strip()
-        else:
             with os.fdopen(descriptor, "w", encoding="ascii") as handle:
                 handle.write(key)
                 handle.flush()
                 os.fsync(handle.fileno())
+            try:
+                os.link(temporary_path, key_path)
+            except FileExistsError:
+                key = key_path.read_text(encoding="ascii").strip()
+        finally:
+            temporary_path.unlink(missing_ok=True)
     if len(key.encode("utf-8")) not in {16, 24, 32}:
         raise CheckpointConfigurationError(
             f"Invalid SQLite checkpoint key file: {key_path}"

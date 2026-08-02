@@ -159,6 +159,16 @@ async def list_run_checkpoints(
     return {"run_id": run_id, "checkpoints": serialized}
 
 
+@app.get("/api/runs/{run_id}/effects")
+async def list_run_effects(request: Request, run_id: str) -> Dict[str, Any]:
+    """List outbox states, including writes requiring reconciliation."""
+    _require_checkpoint_admin(request)
+    return {
+        "run_id": run_id,
+        "effects": await _audit_store(request).get_effects(run_id),
+    }
+
+
 @app.post("/api/runs/{run_id}/resume", response_model=RunCreateResponse)
 async def resume_run(
     request: Request,

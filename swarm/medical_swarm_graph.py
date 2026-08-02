@@ -52,6 +52,10 @@ MEDICAL_SWARM_STATE_SCHEMA_VERSION = 1
 MEDICAL_SWARM_GRAPH_VERSION = "medical-swarm-v1"
 
 
+class WorkflowSideEffectError(RuntimeError):
+    """Raised so a checkpointed side-effect node remains resumable."""
+
+
 class MedicalSwarmGraph:
     """Executable LangGraph workflow for medical multi-agent processing."""
 
@@ -781,6 +785,7 @@ class MedicalSwarmGraph:
                     logger.error(f"Failed to save to short-term memory: {exc}")
 
             summary_saved = False
+            summary_error = None
             if self.enable_long_term_memory and mode == "swarm" and shared_context:
                 try:
                     if await self._claim_memory_effect(state, "session_summary"):
@@ -800,6 +805,7 @@ class MedicalSwarmGraph:
                             state, "session_summary", "completed"
                         )
                 except Exception as exc:
+                    summary_error = str(exc)
                     await self._complete_memory_effect(
                         state, "session_summary", "failed"
                     )
@@ -807,7 +813,9 @@ class MedicalSwarmGraph:
 
             long_term_saved = False
             long_term_error = None
-            if self.enable_long_term_memory:
+            if self.enable_long_term_memory and bool(
+                getattr(self.long_term_memory, "enabled", False)
+            ):
                 try:
                     if await self._claim_memory_effect(state, "long_term_memory"):
                         metadata = {
@@ -832,6 +840,8 @@ class MedicalSwarmGraph:
                             metadata=metadata,
                         )
                         long_term_saved = bool(memory_id)
+                        if not long_term_saved:
+                            raise RuntimeError("Long-term memory provider rejected the write")
                         await self._complete_memory_effect(
                             state,
                             "long_term_memory",
@@ -851,7 +861,7 @@ class MedicalSwarmGraph:
             if collector:
                 errors = [
                     error
-                    for error in (short_term_error, long_term_error)
+                    for error in (short_term_error, summary_error, long_term_error)
                     if error is not None
                 ]
                 collector.record_event(
@@ -878,9 +888,17 @@ class MedicalSwarmGraph:
                         "long_term_enabled": bool(getattr(self.long_term_memory, "enabled", False)),
                     },
                 )
+            persistence_errors = [
+                error
+                for error in (short_term_error, summary_error, long_term_error)
+                if error is not None
+            ]
+            if persistence_errors:
+                raise WorkflowSideEffectError("; ".join(persistence_errors))
 
         except Exception as exc:
-            logger.error(f"save_memory failed (non-critical, response already built): {exc}")
+            logger.error(f"save_memory failed: {exc}")
+            raise
 
         return {"end_time": end_time}
 
@@ -894,7 +912,11 @@ class MedicalSwarmGraph:
         audit_store = getattr(self, "audit_store", None)
         if not run_id or audit_store is None:
             return True
-        return await audit_store.claim_effect(run_id, effect_name)
+        return await audit_store.claim_effect(
+            run_id,
+            effect_name,
+            retry_claimed=effect_name == "session_summary",
+        )
 
     async def _complete_memory_effect(
         self,

@@ -2,13 +2,10 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol
 
 from .checkpointing import CheckpointSettings, checkpoint_serializer
-
-
-EFFECT_LEASE_SECONDS = 300
 
 
 class AuditStore(Protocol):
@@ -21,7 +18,13 @@ class AuditStore(Protocol):
 
     async def get_attempts(self, run_id: str) -> List[Dict[str, Any]]: ...
 
-    async def claim_effect(self, run_id: str, effect_name: str) -> bool: ...
+    async def claim_effect(
+        self,
+        run_id: str,
+        effect_name: str,
+        *,
+        retry_claimed: bool = False,
+    ) -> bool: ...
 
     async def complete_effect(
         self,
@@ -29,6 +32,8 @@ class AuditStore(Protocol):
         effect_name: str,
         status: str,
     ) -> None: ...
+
+    async def get_effects(self, run_id: str) -> List[Dict[str, Any]]: ...
 
 
 class MemoryAuditStore:
@@ -53,7 +58,13 @@ class MemoryAuditStore:
         values.sort(key=lambda item: item.get("run", {}).get("started_at", ""))
         return values
 
-    async def claim_effect(self, run_id: str, effect_name: str) -> bool:
+    async def claim_effect(
+        self,
+        run_id: str,
+        effect_name: str,
+        *,
+        retry_claimed: bool = False,
+    ) -> bool:
         key = (run_id, effect_name)
         now = datetime.now(timezone.utc)
         current = self._effects.get(key)
@@ -61,10 +72,10 @@ class MemoryAuditStore:
             status, updated_at = current
             if status == "completed":
                 return False
-            if (
-                status == "claimed"
-                and now - updated_at < timedelta(seconds=EFFECT_LEASE_SECONDS)
-            ):
+            if status == "unknown":
+                return False
+            if status == "claimed" and not retry_claimed:
+                self._effects[key] = ("unknown", now)
                 return False
         self._effects[key] = ("claimed", now)
         return True
@@ -80,6 +91,17 @@ class MemoryAuditStore:
             status,
             datetime.now(timezone.utc),
         )
+
+    async def get_effects(self, run_id: str) -> List[Dict[str, Any]]:
+        return [
+            {
+                "effect_name": effect_name,
+                "status": status,
+                "updated_at": updated_at.isoformat(),
+            }
+            for (stored_run_id, effect_name), (status, updated_at) in self._effects.items()
+            if stored_run_id == run_id
+        ]
 
 
 class SqliteAuditStore:
@@ -159,9 +181,14 @@ class SqliteAuditStore:
             for row in rows
         ]
 
-    async def claim_effect(self, run_id: str, effect_name: str) -> bool:
+    async def claim_effect(
+        self,
+        run_id: str,
+        effect_name: str,
+        *,
+        retry_claimed: bool = False,
+    ) -> bool:
         now = datetime.now(timezone.utc)
-        expired_before = now - timedelta(seconds=EFFECT_LEASE_SECONDS)
         cursor = await self.connection.execute(
             """
             INSERT INTO workflow_effects (
@@ -171,13 +198,21 @@ class SqliteAuditStore:
                 status='claimed',
                 updated_at=excluded.updated_at
             WHERE workflow_effects.status = 'failed'
-               OR (workflow_effects.status = 'claimed'
-                   AND workflow_effects.updated_at < ?)
+               OR (workflow_effects.status = 'claimed' AND ?)
             RETURNING status
             """,
-            (run_id, effect_name, now.isoformat(), expired_before.isoformat()),
+            (run_id, effect_name, now.isoformat(), retry_claimed),
         )
         row = await cursor.fetchone()
+        if row is None and not retry_claimed:
+            await self.connection.execute(
+                """
+                UPDATE workflow_effects
+                SET status = 'unknown', updated_at = ?
+                WHERE run_id = ? AND effect_name = ? AND status = 'claimed'
+                """,
+                (now.isoformat(), run_id, effect_name),
+            )
         await self.connection.commit()
         return row is not None
 
@@ -202,6 +237,20 @@ class SqliteAuditStore:
             ),
         )
         await self.connection.commit()
+
+    async def get_effects(self, run_id: str) -> List[Dict[str, Any]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT effect_name, status, updated_at
+            FROM workflow_effects WHERE run_id = ? ORDER BY effect_name
+            """,
+            (run_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {"effect_name": row[0], "status": row[1], "updated_at": row[2]}
+            for row in rows
+        ]
 
 
 class PostgresAuditStore:
@@ -273,10 +322,13 @@ class PostgresAuditStore:
             for row in rows
         ]
 
-    async def claim_effect(self, run_id: str, effect_name: str) -> bool:
-        expired_before = datetime.now(timezone.utc) - timedelta(
-            seconds=EFFECT_LEASE_SECONDS
-        )
+    async def claim_effect(
+        self,
+        run_id: str,
+        effect_name: str,
+        *,
+        retry_claimed: bool = False,
+    ) -> bool:
         cursor = await self.connection.execute(
             """
             INSERT INTO workflow_effects (
@@ -286,13 +338,22 @@ class PostgresAuditStore:
                 status='claimed',
                 updated_at=NOW()
             WHERE workflow_effects.status = 'failed'
-               OR (workflow_effects.status = 'claimed'
-                   AND workflow_effects.updated_at < %s)
+               OR (workflow_effects.status = 'claimed' AND %s)
             RETURNING run_id
             """,
-            (run_id, effect_name, expired_before),
+            (run_id, effect_name, retry_claimed),
         )
-        return await cursor.fetchone() is not None
+        row = await cursor.fetchone()
+        if row is None and not retry_claimed:
+            await self.connection.execute(
+                """
+                UPDATE workflow_effects
+                SET status = 'unknown', updated_at = NOW()
+                WHERE run_id = %s AND effect_name = %s AND status = 'claimed'
+                """,
+                (run_id, effect_name),
+            )
+        return row is not None
 
     async def complete_effect(
         self,
@@ -309,6 +370,24 @@ class PostgresAuditStore:
             """,
             (status, run_id, effect_name),
         )
+
+    async def get_effects(self, run_id: str) -> List[Dict[str, Any]]:
+        cursor = await self.connection.execute(
+            """
+            SELECT effect_name, status, updated_at
+            FROM workflow_effects WHERE run_id = %s ORDER BY effect_name
+            """,
+            (run_id,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "effect_name": row[0],
+                "status": row[1],
+                "updated_at": row[2].isoformat(),
+            }
+            for row in rows
+        ]
 
 
 def _validate_effect_status(status: str) -> None:

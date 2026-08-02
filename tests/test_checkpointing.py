@@ -330,6 +330,8 @@ async def test_failed_effect_can_be_reclaimed_but_active_claim_cannot():
     audit_store = MemoryAuditStore()
     assert await audit_store.claim_effect("run-a", "summary") is True
     assert await audit_store.claim_effect("run-a", "summary") is False
+    effects = await audit_store.get_effects("run-a")
+    assert effects[0]["status"] == "unknown"
     await audit_store.complete_effect("run-a", "summary", "failed")
     assert await audit_store.claim_effect("run-a", "summary") is True
 

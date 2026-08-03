@@ -30,4 +30,35 @@ describe("consultation risk presentation", () => {
 
     expect(screen.getByText(label)).toBeInTheDocument();
   });
+
+  it("does not render a trailing structured payload as answer content", () => {
+    const { container } = render(
+      <ChatMessageView
+        message={{
+          id: "message-structured-suffix",
+          role: "assistant",
+          content: [
+            "## 居家建议",
+            "请注意休息并持续观察。",
+            "```json",
+            '{"suggestions":["每4~6小时监测体温"],"risk_level":"medium"}',
+            "```"
+          ].join("\n"),
+          payload: {
+            riskLevel: "medium",
+            suggestions: ["每4~6小时监测体温"],
+            disclaimer: "以上信息仅供参考。",
+            participants: ["健康咨询"],
+            safetyChecked: true,
+            failed: false
+          }
+        }}
+      />
+    );
+
+    expect(screen.getByText("请注意休息并持续观察。")).toBeInTheDocument();
+    expect(screen.getByText("每4~6小时监测体温", { selector: "li" })).toBeInTheDocument();
+    expect(container.querySelector("pre")).not.toBeInTheDocument();
+    expect(screen.queryByText(/"suggestions"/)).not.toBeInTheDocument();
+  });
 });

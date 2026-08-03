@@ -10,6 +10,27 @@ const RISK_CONTENT: Record<RiskLevel, { label: string; summary: string }> = {
   emergency: { label: "急症警示", summary: "请立即联系急救服务或前往急诊" }
 };
 
+const STRUCTURED_METADATA_KEYS = new Set([
+  "suggestions",
+  "disclaimer",
+  "risk_level",
+  "key_findings"
+]);
+
+function stripTrailingStructuredMetadata(content: string): string {
+  const match = content.match(/\n*```json\s*(\{[\s\S]*?\})\s*```\s*$/i);
+  if (!match || match.index === undefined) return content;
+  try {
+    const payload = JSON.parse(match[1]) as unknown;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return content;
+    const keys = Object.keys(payload);
+    if (keys.length === 0 || !keys.every((key) => STRUCTURED_METADATA_KEYS.has(key))) return content;
+    return content.slice(0, match.index).trimEnd();
+  } catch {
+    return content;
+  }
+}
+
 interface Props {
   message: ChatMessage;
   onRetry?: (question: string) => void;
@@ -29,10 +50,11 @@ export function ChatMessageView({ message, onRetry }: Props) {
 
   const payload = message.payload;
   const risk = payload?.riskLevel ? RISK_CONTENT[payload.riskLevel] : null;
+  const visibleContent = stripTrailingStructuredMetadata(message.content);
 
   const copyAnswer = async () => {
     if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(message.content);
+    await navigator.clipboard.writeText(visibleContent);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
   };
@@ -84,7 +106,7 @@ export function ChatMessageView({ message, onRetry }: Props) {
           </div>
         )}
 
-        <div className="bubble-body"><ReactMarkdown>{message.content}</ReactMarkdown></div>
+        <div className="bubble-body"><ReactMarkdown>{visibleContent}</ReactMarkdown></div>
 
         {payload && payload.suggestions.length > 0 && (
           <section className="follow-up-block" aria-labelledby={`advice-${message.id}`}>

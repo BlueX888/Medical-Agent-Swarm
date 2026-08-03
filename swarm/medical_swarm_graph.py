@@ -25,6 +25,7 @@ from core.checkpointing import (
     checkpoint_config,
 )
 from core.observability import trace_async
+from core.response_content import strip_trailing_structured_metadata
 from debug import DebugTraceCollector
 from memory import (
     LongTermMemory,
@@ -941,7 +942,10 @@ class MedicalSwarmGraph:
         """Build the API-compatible final result."""
         mode = state.get("mode") or state.get("route") or "fallback"
         result = dict(state.get("result") or {})
-        final_answer = state.get("final_answer") or result.get("answer", "")
+        final_answer = strip_trailing_structured_metadata(
+            state.get("final_answer") or result.get("answer", "")
+        )
+        result["answer"] = final_answer
 
         if mode == "swarm":
             shared_context = self._shared_context_from_state(state)
@@ -997,7 +1001,7 @@ class MedicalSwarmGraph:
                     "以上分析基于多个专业 Agent 的协作，仅供参考，不能替代医生诊断。"
                 )
         else:
-            result.setdefault("answer", final_answer)
+            result["answer"] = final_answer
             result.setdefault("swarm_enabled", False)
             result.setdefault("session_id", state["session_id"])
             result["suggestions"] = self._extract_suggestions(final_answer)

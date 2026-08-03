@@ -1,10 +1,16 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Clock3, HeartPulse, MessageSquarePlus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  createRun,
+  Activity,
+  Clock3,
+  HeartPulse,
+  MessageSquarePlus,
+  RefreshCcw,
+  ShieldAlert
+} from "lucide-react";
+import {
+  createConsultation,
+  getConsultation,
   getHealth,
-  getRun,
-  getRunEvents,
   getSessionMemory
 } from "./api/client";
 import { Composer } from "./components/Composer";
@@ -15,19 +21,31 @@ import {
   ApiHealth,
   AssistantPayload,
   ChatMessage,
+  ConsultationSnapshot,
   Profile,
   RiskLevel,
-  RunEvent,
-  RunProgress,
-  RunSnapshot,
   ServiceStatus
 } from "./types";
 
 const SESSION_KEY = "mas-user-session";
 const PROFILE_KEY = "mas-user-profile";
-const POLL_INTERVAL_MS = 1500;
+type ConversationState =
+  | "initializing"
+  | "restoring_history"
+  | "ready"
+  | "creating_consultation"
+  | "collaborating"
+  | "success"
+  | "failed"
+  | "offline";
+const POLL_INTERVAL_MS = import.meta.env.MODE === "test" ? 10 : 1500;
 const TERMINAL_STATUSES = new Set(["success", "failed", "timeout"]);
 const RISK_VALUES: RiskLevel[] = ["low", "medium", "high", "emergency"];
+const AGENT_LABELS: Record<string, string> = {
+  consultation_agent: "健康咨询",
+  diagnostic_agent: "风险与症状分析",
+  research_agent: "医学证据检索"
+};
 
 const EXAMPLE_QUESTIONS = [
   "最近两天头痛并伴有恶心，需要马上就医吗？",
@@ -49,9 +67,7 @@ function newSessionId(): string {
 
 function loadSessionId(): string {
   const stored = localStorage.getItem(SESSION_KEY);
-  if (stored) {
-    return stored;
-  }
+  if (stored) return stored;
   const created = newSessionId();
   localStorage.setItem(SESSION_KEY, created);
   return created;
@@ -74,46 +90,7 @@ function loadProfile(): Profile {
 
 function hasStoredProfile(): boolean {
   const loaded = loadProfile();
-  return [loaded.age, loaded.sex, loaded.medicalHistory, loaded.medications].some((value) =>
-    value.trim()
-  );
-}
-
-// 在任意嵌套结构里递归找某个键，用于从 result_json / 事件输出中提取 risk_level。
-function findKeyDeep(value: unknown, key: string): unknown {
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findKeyDeep(item, key);
-      if (found !== undefined) {
-        return found;
-      }
-    }
-    return undefined;
-  }
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    if (record[key] !== undefined) {
-      return record[key];
-    }
-    for (const child of Object.values(record)) {
-      const found = findKeyDeep(child, key);
-      if (found !== undefined) {
-        return found;
-      }
-    }
-  }
-  return undefined;
-}
-
-function extractRiskLevel(run: RunSnapshot, events: RunEvent[]): RiskLevel | null {
-  const candidates = [run.result_json, ...events.slice().reverse().map((event) => event.output)];
-  for (const candidate of candidates) {
-    const raw = findKeyDeep(candidate, "risk_level");
-    if (typeof raw === "string" && RISK_VALUES.includes(raw.toLowerCase() as RiskLevel)) {
-      return raw.toLowerCase() as RiskLevel;
-    }
-  }
-  return null;
+  return [loaded.age, loaded.sex, loaded.medicalHistory, loaded.medications].some((value) => value.trim());
 }
 
 function asStringArray(value: unknown): string[] {
@@ -124,27 +101,8 @@ function toServiceStatus(health: ApiHealth): ServiceStatus {
   return health.status === "ok" && health.memory.status === "ok" ? "healthy" : "degraded";
 }
 
-function buildFailureMessage(id: string, content: string): ChatMessage {
-  return {
-    id,
-    role: "assistant",
-    content,
-    payload: {
-      riskLevel: null,
-      suggestions: [],
-      disclaimer: "",
-      agentsInvolved: [],
-      failed: true
-    }
-  };
-}
-
-function buildPayloadFromMetadata(
-  metadata: Record<string, unknown> | undefined
-): AssistantPayload | undefined {
-  if (!metadata) {
-    return undefined;
-  }
+function buildPayloadFromMetadata(metadata: Record<string, unknown> | undefined): AssistantPayload | undefined {
+  if (!metadata) return undefined;
   const rawRisk = metadata.risk_level;
   const riskLevel =
     typeof rawRisk === "string" && RISK_VALUES.includes(rawRisk.toLowerCase() as RiskLevel)
@@ -154,206 +112,267 @@ function buildPayloadFromMetadata(
     riskLevel,
     suggestions: asStringArray(metadata.suggestions),
     disclaimer: typeof metadata.disclaimer === "string" ? metadata.disclaimer : "",
-    agentsInvolved: asStringArray(metadata.agents_involved),
+    participants: asStringArray(metadata.agents_involved)
+      .map((id) => AGENT_LABELS[id])
+      .filter((label): label is string => Boolean(label)),
+    safetyChecked: metadata.safety_checked === true,
     failed: false
   };
 }
 
-function buildAssistantMessage(run: RunSnapshot, events: RunEvent[]): ChatMessage {
-  const result = run.result_json ?? {};
-  const failed = run.status === "failed";
-  const answer = failed
-    ? "抱歉，这次分析没有完成。请稍后重试；如果症状严重或在加重，请直接就医。"
-    : run.final_answer ||
-      (typeof result["answer"] === "string" ? (result["answer"] as string) : "") ||
-      "抱歉，这次没有生成有效的回答，请换个说法再试一次。";
-  const payload: AssistantPayload = {
-    riskLevel: failed ? null : extractRiskLevel(run, events),
-    suggestions: failed ? [] : asStringArray(result["suggestions"]),
-    disclaimer: typeof result["disclaimer"] === "string" ? (result["disclaimer"] as string) : "",
-    agentsInvolved: asStringArray(result["agents_involved"]),
-    failed
+function buildAssistantMessage(snapshot: ConsultationSnapshot): ChatMessage {
+  if (snapshot.status === "success" && snapshot.result) {
+    return {
+      id: `assistant-${snapshot.consultation_id}`,
+      role: "assistant",
+      content: snapshot.result.answer || "本次没有生成有效回答，请换个说法再试一次。",
+      payload: {
+        riskLevel: snapshot.result.risk_level,
+        suggestions: snapshot.result.suggestions,
+        disclaimer: snapshot.result.disclaimer,
+        participants: snapshot.result.participants,
+        safetyChecked: snapshot.progress.safety_checked,
+        failed: false
+      }
+    };
+  }
+  return {
+    id: `assistant-${snapshot.consultation_id}`,
+    role: "assistant",
+    content: snapshot.failure?.message ?? "本轮会诊未能完成，请重新尝试。",
+    payload: {
+      riskLevel: null,
+      suggestions: [],
+      disclaimer: "",
+      participants: [],
+      safetyChecked: snapshot.progress.safety_checked,
+      failed: true,
+      timedOut: snapshot.status === "timeout"
+    }
   };
-  return { id: `assistant-${run.run_id}`, role: "assistant", content: answer, payload };
 }
 
 function App() {
   const [sessionId, setSessionId] = useState(loadSessionId);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [historyStatus, setHistoryStatus] = useState<"loading" | "ready">("loading");
   const [input, setInput] = useState("");
   const [profile, setProfile] = useState<Profile>(loadProfile);
   const [rememberProfile, setRememberProfile] = useState(hasStoredProfile);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [progress, setProgress] = useState<RunProgress | null>(null);
+  const [snapshot, setSnapshot] = useState<ConsultationSnapshot | null>(null);
+  const [activeConsultationId, setActiveConsultationId] = useState<string | null>(null);
+  const [activeQuestion, setActiveQuestion] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [serviceStatus, setServiceStatus] = useState<ServiceStatus>("checking");
   const [confirmNewChat, setConfirmNewChat] = useState(false);
   const [previousSessionId, setPreviousSessionId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const isBusy = progress !== null;
+  const isBusy = submitting || activeConsultationId !== null;
+  const conversationState: ConversationState =
+    serviceStatus === "offline"
+      ? "offline"
+      : serviceStatus === "checking"
+        ? "initializing"
+        : historyStatus === "loading"
+          ? "restoring_history"
+          : submitting
+            ? "creating_consultation"
+            : activeConsultationId
+              ? "collaborating"
+              : snapshot?.status === "success"
+                ? "success"
+                : snapshot?.status === "failed" || snapshot?.status === "timeout"
+                  ? "failed"
+                  : "ready";
+  const profileCount = [profile.age, profile.sex, profile.medicalHistory, profile.medications].filter(
+    (value) => value.trim()
+  ).length;
 
-  // 持续探测服务状态，区分正常、降级与离线，避免把 HTTP 200 一律显示为正常。
-  useEffect(() => {
-    let active = true;
-    const refreshHealth = () => {
-      getHealth()
-        .then((health) => {
-          if (!active) return;
-          setServiceStatus(toServiceStatus(health));
-        })
-        .catch(() => {
-          if (active) setServiceStatus("offline");
-        });
-    };
-    refreshHealth();
-    const timer = window.setInterval(refreshHealth, 30_000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
+  const refreshHealth = useCallback(async () => {
+    try {
+      setServiceStatus(toServiceStatus(await getHealth()));
+    } catch {
+      setServiceStatus("offline");
+    }
   }, []);
 
-  // 会话切换时恢复历史，并取消旧请求，避免新对话被旧会话结果覆盖。
+  useEffect(() => {
+    void refreshHealth();
+    const timer = window.setInterval(refreshHealth, 30_000);
+    return () => window.clearInterval(timer);
+  }, [refreshHealth]);
+
   useEffect(() => {
     let cancelled = false;
+    setHistoryStatus("loading");
     setMessages([]);
+    setSnapshot(null);
     getSessionMemory(sessionId)
       .then((memory) => {
         if (cancelled) return;
-        const restored = memory.recent_history
-          .filter((item) => item.role === "user" || item.role === "assistant")
-          .map((item, index): ChatMessage => ({
-            id: `history-${index}`,
-            role: item.role as "user" | "assistant",
-            content: item.content,
-            payload:
-              item.role === "assistant"
-                ? buildPayloadFromMetadata(item.metadata as Record<string, unknown> | undefined)
-                : undefined
-          }));
-        setMessages(restored);
+        setMessages(
+          memory.recent_history
+            .filter((item) => item.role === "user" || item.role === "assistant")
+            .map((item, index): ChatMessage => ({
+              id: `history-${sessionId}-${index}`,
+              role: item.role as "user" | "assistant",
+              content: item.content,
+              payload:
+                item.role === "assistant"
+                  ? buildPayloadFromMetadata(item.metadata as Record<string, unknown> | undefined)
+                  : undefined
+            }))
+        );
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setHistoryStatus("ready");
+      });
     return () => {
       cancelled = true;
     };
   }, [sessionId]);
 
   useEffect(() => {
-    if (rememberProfile) {
-      localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-    } else {
-      localStorage.removeItem(PROFILE_KEY);
-    }
+    if (rememberProfile) localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    else localStorage.removeItem(PROFILE_KEY);
   }, [profile, rememberProfile]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, progress]);
+  }, [messages, snapshot]);
 
-  // 轮询当前 run：更新进度卡阶段，进入终态后转成助手消息。
   useEffect(() => {
-    if (!progress) {
-      return;
-    }
-    const runId = progress.runId;
+    if (!activeConsultationId) return;
+    const consultationId = activeConsultationId;
     let cancelled = false;
+    let timer: number | undefined;
+    let failures = 0;
 
     const poll = async () => {
       try {
-        const [run, events] = await Promise.all([getRun(runId), getRunEvents(runId)]);
-        if (cancelled) {
+        const next = await getConsultation(consultationId, sessionId);
+        if (cancelled) return;
+        failures = 0;
+        setSnapshot(next);
+        if (TERMINAL_STATUSES.has(next.status)) {
+          const completedMessage = buildAssistantMessage(next);
+          if (next.status !== "success") completedMessage.retryQuestion = activeQuestion;
+          setMessages((current) =>
+            current.some((message) => message.id === completedMessage.id)
+              ? current
+              : [...current, completedMessage]
+          );
+          setActiveConsultationId(null);
           return;
         }
-        const stagesSeen = [...new Set(events.map((event) => event.stage))];
-        const agentCount = new Set(
-          events.filter((event) => event.agent_id).map((event) => event.agent_id)
-        ).size;
-        if (TERMINAL_STATUSES.has(run.status)) {
-          setProgress(null);
-          // 以 run_id 去重，避免终态时并发的两次轮询重复追加同一条回答。
-          setMessages((current) =>
-            current.some((message) => message.id === `assistant-${run.run_id}`)
-              ? current
-              : [...current, buildAssistantMessage(run, events)]
-          );
-        } else {
-          setProgress({ runId, stagesSeen, agentCount });
-        }
+        timer = window.setTimeout(poll, POLL_INTERVAL_MS);
       } catch {
-        if (!cancelled) {
-          setServiceStatus("offline");
-          setProgress(null);
-          setMessages((current) => [
-            ...current,
-            buildFailureMessage(
-              `assistant-error-${runId}`,
-              "与服务器的连接中断了，请确认服务恢复后重试。"
-            )
-          ]);
+        failures += 1;
+        if (cancelled) return;
+        if (failures < 3) {
+          timer = window.setTimeout(poll, POLL_INTERVAL_MS);
+          return;
         }
+        setServiceStatus("offline");
+        setActiveConsultationId(null);
+        setSnapshot(null);
+        setMessages((current) => [
+          ...current,
+          {
+            id: `assistant-network-${consultationId}`,
+            role: "assistant",
+            content: "连接中断了。请重新连接后再次分析；如症状严重或正在加重，请及时线下就医。",
+            retryQuestion: activeQuestion,
+            payload: {
+              riskLevel: null,
+              suggestions: [],
+              disclaimer: "",
+              participants: [],
+              safetyChecked: false,
+              failed: true
+            }
+          }
+        ]);
       }
     };
 
-    const timer = window.setInterval(poll, POLL_INTERVAL_MS);
     void poll();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [progress?.runId]);
+  }, [activeConsultationId, activeQuestion, sessionId]);
 
   const context = useMemo(() => {
     const entries: Record<string, string> = {};
     const age = Number(profile.age);
-    if (
-      profile.age.trim() &&
-      Number.isInteger(age) &&
-      age >= 0 &&
-      age <= 120
-    ) {
-      entries.age = String(age);
-    }
+    if (profile.age.trim() && Number.isInteger(age) && age >= 0 && age <= 120) entries.age = String(age);
     if (profile.sex.trim()) entries.sex = profile.sex.trim();
     if (profile.medicalHistory.trim()) entries.medical_history = profile.medicalHistory.trim();
     if (profile.medications.trim()) entries.medications = profile.medications.trim();
     return entries;
   }, [profile]);
 
-  const sendQuestion = async () => {
-    const question = input.trim();
-    if (!question || isBusy) {
-      return;
-    }
-    setInput("");
-    setPreviousSessionId(null);
-    setMessages((current) => [
-      ...current,
-      { id: `user-${Date.now()}`, role: "user", content: question }
-    ]);
-    try {
-      const created = await createRun({ question, context, session_id: sessionId });
-      getHealth()
-        .then((health) => setServiceStatus(toServiceStatus(health)))
-        .catch(() => setServiceStatus("offline"));
-      setProgress({ runId: created.run_id, stagesSeen: [], agentCount: 0 });
-    } catch {
-      setServiceStatus("offline");
+  const submitQuestion = async (question: string, appendUserMessage: boolean) => {
+    const normalized = question.trim();
+    if (!normalized || isBusy || serviceStatus === "offline") return;
+    setSubmitting(true);
+    setActiveQuestion(normalized);
+    setSnapshot(null);
+    if (appendUserMessage) {
       setMessages((current) => [
         ...current,
-        buildFailureMessage(
-          `assistant-error-${Date.now()}`,
-          "暂时联系不上分析服务，请确认服务恢复后重试。"
-        )
+        { id: `user-${Date.now()}`, role: "user", content: normalized }
       ]);
+    } else {
+      setMessages((current) => current.filter((message) => message.retryQuestion !== normalized));
+    }
+
+    try {
+      const created = await createConsultation({ question: normalized, context, session_id: sessionId });
+      setInput("");
+      setPreviousSessionId(null);
+      setActiveConsultationId(created.consultation_id);
+      void refreshHealth();
+    } catch {
+      setInput(normalized);
+      setMessages((current) => [
+        ...current,
+        {
+          id: `assistant-create-error-${Date.now()}`,
+          role: "assistant",
+          content: "暂时无法开始会诊。请检查连接后重试；如症状严重或正在加重，请及时线下就医。",
+          retryQuestion: normalized,
+          payload: {
+            riskLevel: null,
+            suggestions: [],
+            disclaimer: "",
+            participants: [],
+            safetyChecked: false,
+            failed: true
+          }
+        }
+      ]);
+      void refreshHealth();
+    } finally {
+      setSubmitting(false);
     }
   };
 
+  const sendQuestion = () => void submitQuestion(input, true);
+  const retryQuestion = (question: string) => void submitQuestion(question, false);
+
+  const chooseExample = (question: string) => {
+    setInput(question);
+    composerRef.current?.focus();
+  };
+
   const startNewConversation = () => {
-    if (isBusy) {
-      return;
-    }
-    setConfirmNewChat(true);
+    if (!isBusy) setConfirmNewChat(true);
   };
 
   const confirmStartNewConversation = () => {
@@ -364,6 +383,7 @@ function App() {
     setInput("");
     setProfileOpen(false);
     setConfirmNewChat(false);
+    setActiveConsultationId(null);
   };
 
   const restorePreviousConversation = () => {
@@ -372,7 +392,6 @@ function App() {
     setSessionId(previousSessionId);
     setPreviousSessionId(null);
     setInput("");
-    setProfileOpen(false);
   };
 
   const clearProfile = () => {
@@ -381,123 +400,112 @@ function App() {
     setProfile({ ...EMPTY_PROFILE });
   };
 
+  const hasMessages = messages.length > 0;
+  const composerDisabled =
+    isBusy || historyStatus === "loading" || serviceStatus === "checking" || serviceStatus === "offline";
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-conversation-state={conversationState}>
       <header className="topbar">
-        <div className="topbar-title">
-          <h1>健康助手</h1>
-          <div
-            className={`service-status service-status-${serviceStatus}`}
-            role="status"
-            aria-live="polite"
-          >
-            <span className="status-dot" aria-hidden="true" />
-            <span className="status-text">{SERVICE_LABELS[serviceStatus]}</span>
+        <div className="brand-lockup">
+          <span className="brand-mark" aria-hidden="true"><HeartPulse size={20} /></span>
+          <div>
+            <div className="brand-line">
+              <h1>健康导航</h1>
+              <span className="prototype-badge">研究原型</span>
+            </div>
+            <p>多角色协作的健康信息参考</p>
           </div>
         </div>
-        <div className="new-chat-control">
-          <button
-            type="button"
-            className="new-chat-button"
-            onClick={startNewConversation}
-            disabled={isBusy}
-            aria-expanded={confirmNewChat}
-          >
-            <MessageSquarePlus size={15} />
-            新对话
-          </button>
-          {confirmNewChat && (
-            <div className="new-chat-confirmation" role="dialog" aria-label="确认开始新对话">
-              <p>当前对话仍会保留约 24 小时。开始后可立即返回。</p>
-              <div>
-                <button type="button" onClick={() => setConfirmNewChat(false)}>
-                  取消
-                </button>
-                <button type="button" className="confirm-button" onClick={confirmStartNewConversation}>
-                  开始新对话
-                </button>
+        <div className="topbar-actions">
+          <div className={`service-status service-status-${serviceStatus}`} role="status" aria-live="polite">
+            <span className="status-dot" aria-hidden="true" />
+            <span>{SERVICE_LABELS[serviceStatus]}</span>
+          </div>
+          <div className="new-chat-control">
+            <button type="button" className="new-chat-button" onClick={startNewConversation} disabled={isBusy} aria-expanded={confirmNewChat}>
+              <MessageSquarePlus size={16} />新对话
+            </button>
+            {confirmNewChat && (
+              <div className="new-chat-confirmation" role="dialog" aria-label="确认开始新对话">
+                <p>当前对话仍会保留约 24 小时。开始后可立即返回。</p>
+                <div>
+                  <button type="button" onClick={() => setConfirmNewChat(false)}>取消</button>
+                  <button type="button" className="confirm-button" onClick={confirmStartNewConversation}>开始新对话</button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </header>
+
       <div className="notice-banner" role="note">
-        <span>健康建议不能替代医生诊断。</span>
-        <strong>如有胸痛、呼吸困难、意识异常或严重出血，请立即拨打 120。</strong>
+        <span><ShieldAlert size={16} aria-hidden="true" />健康建议不能替代医生诊断</span>
+        <strong>胸痛、呼吸困难、意识异常或严重出血，请立即拨打 120</strong>
+        {serviceStatus === "offline" && (
+          <button type="button" onClick={() => void refreshHealth()}><RefreshCcw size={14} />重新连接</button>
+        )}
       </div>
 
-      <main className="chat-area">
-        {messages.length === 0 && !progress && (
-          <div className="empty-state">
-            {previousSessionId && (
-              <button
-                type="button"
-                className="restore-conversation-button"
-                onClick={restorePreviousConversation}
-              >
-                返回上一对话
-              </button>
+      <div className="workspace">
+        <section className="conversation-panel" aria-label="健康咨询对话">
+          <main className="chat-area">
+            {historyStatus === "loading" && (
+              <div className="history-loading" role="status">正在恢复对话…</div>
             )}
-            <p className="empty-kicker">先判断风险，再整理下一步</p>
-            <p className="empty-greeting">你好，说说哪里不舒服？</p>
-            <p className="empty-sub">描述得越具体，越容易得到清晰的就医与护理建议。</p>
-            <div className="question-guide" aria-label="描述症状时建议包含">
-              <div className="guide-item">
-                <Activity size={17} aria-hidden="true" />
-                <span>
-                  <strong>哪里不舒服</strong>
-                  <small>部位与感觉</small>
-                </span>
+            {historyStatus === "ready" && !hasMessages && !isBusy && (
+              <div className="empty-state">
+                {previousSessionId && (
+                  <button type="button" className="restore-conversation-button" onClick={restorePreviousConversation}>返回上一对话</button>
+                )}
+                <p className="empty-kicker">先判断风险，再找到下一步</p>
+                <h2>说说最担心的症状</h2>
+                <p className="empty-sub">从最影响你的问题开始。信息越具体，建议越容易落实。</p>
+                <div className="question-guide" aria-label="描述症状时建议包含">
+                  <div className="guide-item"><Activity size={18} /><span><strong>不舒服的部位</strong><small>感觉与严重程度</small></span></div>
+                  <div className="guide-item"><Clock3 size={18} /><span><strong>持续了多久</strong><small>突然、反复或持续</small></span></div>
+                  <div className="guide-item"><HeartPulse size={18} /><span><strong>伴随的情况</strong><small>其他症状与用药</small></span></div>
+                </div>
+                <div className="example-list" aria-label="示例问题">
+                  {EXAMPLE_QUESTIONS.map((question) => (
+                    <button key={question} type="button" className="suggestion-chip" onClick={() => chooseExample(question)}>{question}</button>
+                  ))}
+                </div>
               </div>
-              <div className="guide-item">
-                <Clock3 size={17} aria-hidden="true" />
-                <span>
-                  <strong>从何时开始</strong>
-                  <small>持续、反复或突然</small>
-                </span>
-              </div>
-              <div className="guide-item">
-                <HeartPulse size={17} aria-hidden="true" />
-                <span>
-                  <strong>还有什么异常</strong>
-                  <small>伴随症状与用药</small>
-                </span>
-              </div>
-            </div>
-            <p className="example-heading">也可以从这些描述开始</p>
-            <div className="example-list">
-              {EXAMPLE_QUESTIONS.map((question) => (
-                <button
-                  key={question}
-                  type="button"
-                  className="suggestion-chip"
-                  onClick={() => setInput(question)}
-                >
-                  {question}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {messages.map((message) => (
-          <ChatMessageView key={message.id} message={message} />
-        ))}
-        {progress && <ProgressCard progress={progress} />}
-        <div ref={bottomRef} />
-      </main>
+            )}
+            {messages.map((message) => (
+              <ChatMessageView key={message.id} message={message} onRetry={retryQuestion} />
+            ))}
+            {(snapshot || isBusy) && <div className="mobile-progress"><ProgressCard snapshot={snapshot} /></div>}
+            <div ref={bottomRef} />
+          </main>
+          <footer className="input-area">
+            <Composer
+              ref={composerRef}
+              value={input}
+              onChange={setInput}
+              onSend={sendQuestion}
+              onOpenProfile={() => setProfileOpen(true)}
+              disabled={composerDisabled}
+              busy={isBusy}
+              hasMessages={hasMessages}
+              profileCount={profileCount}
+            />
+          </footer>
+        </section>
 
-      <footer className="input-area">
-        <ProfileCard
-          profile={profile}
-          onChange={setProfile}
-          open={profileOpen}
-          onToggle={() => setProfileOpen((open) => !open)}
-          rememberProfile={rememberProfile}
-          onRememberChange={setRememberProfile}
-          onClear={clearProfile}
-        />
-        <Composer value={input} onChange={setInput} onSend={sendQuestion} disabled={isBusy} />
-      </footer>
+        <aside className="consultation-sidebar"><ProgressCard snapshot={snapshot} /></aside>
+      </div>
+
+      <ProfileCard
+        profile={profile}
+        onChange={setProfile}
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        rememberProfile={rememberProfile}
+        onRememberChange={setRememberProfile}
+        onClear={clearProfile}
+      />
     </div>
   );
 }

@@ -1,30 +1,19 @@
 export type RiskLevel = "low" | "medium" | "high" | "emergency";
 export type ServiceStatus = "checking" | "healthy" | "degraded" | "offline";
 export type Sex = "" | "女" | "男" | "其他";
+export type ConsultationStatus = "queued" | "running" | "success" | "failed" | "timeout";
+export type ConsultationPhase =
+  | "understanding"
+  | "planning"
+  | "consulting"
+  | "safety_review"
+  | "finalizing";
 
 export interface Profile {
   age: string;
   sex: Sex;
   medicalHistory: string;
   medications: string;
-}
-
-export interface RunSnapshot {
-  run_id: string;
-  session_id: string | null;
-  status: string;
-  final_answer: string;
-  result_json: Record<string, unknown> | null;
-}
-
-export interface RunEvent {
-  sequence: number;
-  stage: string;
-  name: string | null;
-  agent_id: string | null;
-  skill_name: string | null;
-  output: unknown;
-  status: string;
 }
 
 export interface ApiHealth {
@@ -43,17 +32,54 @@ export interface MemoryResponse {
       suggestions?: unknown;
       disclaimer?: unknown;
       agents_involved?: unknown;
+      safety_checked?: unknown;
     };
   }>;
 }
 
-// 助手回答里除正文外还带一组从 result_json / events 提炼出来的展示字段。
+export interface ConsultationParticipant {
+  id: string;
+  label: string;
+  state: "waiting" | "active" | "done" | "failed";
+}
+
+export interface ConsultationProgress {
+  current_phase: ConsultationPhase;
+  completed_phases: ConsultationPhase[];
+  participants: ConsultationParticipant[];
+  safety_checked: boolean;
+}
+
+export interface ConsultationResult {
+  answer: string;
+  risk_level: RiskLevel | null;
+  suggestions: string[];
+  disclaimer: string;
+  participants: string[];
+}
+
+export interface ConsultationFailure {
+  code: "analysis_failed" | "analysis_timeout";
+  message: string;
+  retryable: boolean;
+}
+
+export interface ConsultationSnapshot {
+  consultation_id: string;
+  status: ConsultationStatus;
+  progress: ConsultationProgress;
+  result: ConsultationResult | null;
+  failure: ConsultationFailure | null;
+}
+
 export interface AssistantPayload {
   riskLevel: RiskLevel | null;
   suggestions: string[];
   disclaimer: string;
-  agentsInvolved: string[];
+  participants: string[];
+  safetyChecked: boolean;
   failed: boolean;
+  timedOut?: boolean;
 }
 
 export interface ChatMessage {
@@ -61,11 +87,5 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   payload?: AssistantPayload;
-}
-
-// 等待回答期间进度卡的状态：已出现过的阶段 + 参与协作的 Agent 数。
-export interface RunProgress {
-  runId: string;
-  stagesSeen: string[];
-  agentCount: number;
+  retryQuestion?: string;
 }

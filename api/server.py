@@ -32,6 +32,9 @@ from swarm import SwarmCoordinator
 
 from .schemas import (
     AgentInfo,
+    ConsultationCreateRequest,
+    ConsultationCreateResponse,
+    ConsultationSnapshot,
     DebugEventsResponse,
     DebugRunResponse,
     EffectReconcileRequest,
@@ -47,6 +50,19 @@ from .schemas import (
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 RUN_STORE = InMemoryTraceStore()
 LONG_TERM_MEMORY = LongTermMemory()
+
+PUBLIC_PHASES = [
+    "understanding",
+    "planning",
+    "consulting",
+    "safety_review",
+    "finalizing",
+]
+PUBLIC_AGENT_ROLES = {
+    "consultation_agent": ("health_consultation", "健康咨询"),
+    "diagnostic_agent": ("symptom_analysis", "风险与症状分析"),
+    "research_agent": ("evidence_research", "医学证据检索"),
+}
 
 
 @asynccontextmanager
@@ -101,14 +117,18 @@ async def health(request: Request) -> Dict[str, Any]:
     }
 
 
-@app.post("/api/runs", response_model=RunCreateResponse)
-async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateResponse:
+def _start_workflow(
+    request: Request,
+    payload: RunCreateRequest,
+    *,
+    source: str,
+) -> DebugTraceCollector:
     collector = DebugTraceCollector(
         question=payload.question,
         context=payload.context,
         session_id=payload.session_id,
         metadata={
-            "source": "api",
+            "source": source,
             "enable_swarm": payload.enable_swarm,
             "enable_memory": payload.enable_memory,
             "enable_short_term_memory": payload.enable_short_term_memory,
@@ -117,7 +137,6 @@ async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateRe
         },
     )
     RUN_STORE.add(collector)
-
     _spawn_workflow_task(
         request,
         _execute_run(
@@ -127,8 +146,14 @@ async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateRe
             _checkpointer(request),
             _run_lease(request),
             _audit_store(request),
-        )
+        ),
     )
+    return collector
+
+
+@app.post("/api/runs", response_model=RunCreateResponse)
+async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateResponse:
+    collector = _start_workflow(request, payload, source="api")
 
     run = collector.get_run().to_dict()
     return RunCreateResponse(
@@ -136,6 +161,47 @@ async def create_run(payload: RunCreateRequest, request: Request) -> RunCreateRe
         status=run["status"],
         run=run,
     )
+
+
+@app.post(
+    "/api/consultations",
+    response_model=ConsultationCreateResponse,
+)
+async def create_consultation(
+    payload: ConsultationCreateRequest,
+    request: Request,
+) -> ConsultationCreateResponse:
+    run_payload = RunCreateRequest(
+        question=payload.question,
+        context=payload.context,
+        session_id=payload.session_id,
+        enable_swarm=True,
+        enable_memory=True,
+    )
+    collector = _start_workflow(request, run_payload, source="consultation_api")
+    return ConsultationCreateResponse(
+        consultation_id=collector.run_id,
+        status="queued",
+    )
+
+
+@app.get(
+    "/api/consultations/{consultation_id}",
+    response_model=ConsultationSnapshot,
+)
+async def get_consultation(
+    request: Request,
+    consultation_id: str,
+) -> ConsultationSnapshot:
+    run, events = await _get_public_consultation_data(request, consultation_id)
+    supplied_session_id = request.headers.get("X-Session-ID", "")
+    expected_session_id = str(run.get("session_id") or "")
+    if not supplied_session_id or not secrets.compare_digest(
+        supplied_session_id,
+        expected_session_id,
+    ):
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    return ConsultationSnapshot(**_build_public_consultation_snapshot(run, events))
 
 
 @app.get("/api/runs/{run_id}/checkpoints")
@@ -427,6 +493,243 @@ async def _execute_resume(
         )
     except Exception as exc:
         collector.finish_failed(exc)
+
+
+async def _get_public_consultation_data(
+    request: Request,
+    consultation_id: str,
+) -> tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    collector = RUN_STORE.get(consultation_id)
+    if collector:
+        run = collector.get_run().to_dict()
+        if not _is_public_consultation_run(run):
+            raise HTTPException(status_code=404, detail="Consultation not found")
+        return run, [event.to_dict() for event in collector.get_events()]
+    attempts = await _audit_store(request).get_attempts(consultation_id)
+    if not attempts:
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    latest = attempts[-1]
+    run = dict(latest.get("run") or {})
+    if not _is_public_consultation_run(run):
+        raise HTTPException(status_code=404, detail="Consultation not found")
+    return run, [dict(event) for event in latest.get("events") or []]
+
+
+def _is_public_consultation_run(run: Dict[str, Any]) -> bool:
+    metadata = run.get("metadata")
+    return isinstance(metadata, dict) and metadata.get("source") == "consultation_api"
+
+
+def _build_public_consultation_snapshot(
+    run: Dict[str, Any],
+    events: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    raw_status = str(run.get("status") or "running").lower()
+    terminal = raw_status in {"success", "failed", "timeout"}
+    status = raw_status if terminal else ("running" if events else "queued")
+    current_phase = "finalizing" if raw_status == "success" else _current_public_phase(events)
+    current_index = PUBLIC_PHASES.index(current_phase)
+    completed_phases = PUBLIC_PHASES[:current_index]
+    if raw_status == "success":
+        completed_phases = list(PUBLIC_PHASES)
+
+    completed_agent_ids = list(
+        dict.fromkeys(
+            str(event.get("agent_id"))
+            for event in events
+            if event.get("agent_id") in PUBLIC_AGENT_ROLES
+            and event.get("stage") == "agent_loop"
+            and event.get("name") == "agent_loop"
+            and event.get("status") == "success"
+        )
+    )
+    failed_agent_ids = {
+        str(event.get("agent_id"))
+        for event in events
+        if event.get("agent_id") in PUBLIC_AGENT_ROLES
+        and event.get("stage") == "agent_loop"
+        and event.get("name") == "agent_loop"
+        and event.get("status") == "failed"
+    }
+    planned_agent_ids = _planned_public_agent_ids(events)
+    agent_ids = list(dict.fromkeys([*planned_agent_ids, *completed_agent_ids]))
+    participants = []
+    for agent_id in agent_ids:
+        public_id, label = PUBLIC_AGENT_ROLES[agent_id]
+        if agent_id in failed_agent_ids:
+            state = "failed"
+        elif raw_status == "success" or current_index > PUBLIC_PHASES.index("consulting"):
+            state = "done"
+        elif agent_id in completed_agent_ids:
+            state = "done"
+        elif raw_status in {"failed", "timeout"}:
+            state = "failed"
+        elif current_phase == "consulting":
+            state = "active"
+        else:
+            state = "waiting"
+        participants.append({"id": public_id, "label": label, "state": state})
+
+    result_json = run.get("result_json")
+    result_data = result_json if isinstance(result_json, dict) else {}
+    result = None
+    failure = None
+    if raw_status == "success":
+        risk_level = _find_public_risk_level(result_data)
+        result_agent_ids = [
+            agent_id
+            for agent_id in _string_list(result_data.get("agents_involved"))
+            if agent_id in PUBLIC_AGENT_ROLES
+        ]
+        visible_agent_ids = result_agent_ids or agent_ids
+        result = {
+            "answer": str(run.get("final_answer") or result_data.get("answer") or ""),
+            "risk_level": risk_level,
+            "suggestions": _string_list(result_data.get("suggestions")),
+            "disclaimer": str(result_data.get("disclaimer") or ""),
+            "participants": [PUBLIC_AGENT_ROLES[agent_id][1] for agent_id in visible_agent_ids],
+        }
+    elif raw_status in {"failed", "timeout"}:
+        timed_out = raw_status == "timeout"
+        failure = {
+            "code": "analysis_timeout" if timed_out else "analysis_failed",
+            "message": (
+                "分析时间较长，请重新尝试；如症状正在加重，请及时线下就医。"
+                if timed_out
+                else "本次分析未能完成，请重新尝试；如症状严重或正在加重，请及时线下就医。"
+            ),
+            "retryable": True,
+        }
+
+    return {
+        "consultation_id": str(run.get("run_id") or ""),
+        "status": status,
+        "progress": {
+            "current_phase": current_phase,
+            "completed_phases": completed_phases,
+            "participants": participants,
+            "safety_checked": _public_safety_checked(events),
+        },
+        "result": result,
+        "failure": failure,
+    }
+
+
+def _public_phase_for_event(event: Dict[str, Any]) -> Optional[str]:
+    stage = str(event.get("stage") or "")
+    name = str(event.get("name") or "")
+    if stage == "memory" and name == "save_memory":
+        return "finalizing"
+    if stage in {"memory", "load_memory"}:
+        return "understanding"
+    if stage in {"planning", "routing", "constraint_check"}:
+        return "planning"
+    if stage in {"agent_loop", "skill_call", "swarm_context"}:
+        return "consulting"
+    if stage == "safety_check":
+        return "safety_review"
+    return None
+
+
+def _current_public_phase(events: List[Dict[str, Any]]) -> str:
+    if any(
+        (
+            str(event.get("stage") or "") == "save_memory"
+            or (
+                str(event.get("stage") or "") == "memory"
+                and str(event.get("name") or "") == "save_memory"
+            )
+        )
+        and str(event.get("status") or "success") == "success"
+        for event in events
+    ):
+        return "finalizing"
+    if any(str(event.get("stage") or "") == "safety_check" for event in events):
+        return "finalizing" if _public_safety_checked(events) else "safety_review"
+    if any(
+        str(event.get("stage") or "") == "agent_loop"
+        and str(event.get("name") or "") in {"run_single_agent", "run_swarm", "run_fallback"}
+        and str(event.get("status") or "success") == "success"
+        for event in events
+    ):
+        return "safety_review"
+    if any(
+        str(event.get("stage") or "") == "routing"
+        and str(event.get("status") or "success") == "success"
+        for event in events
+    ):
+        return "consulting"
+    if any(
+        str(event.get("stage") or "") == "agent_loop"
+        and str(event.get("name") or "") in {"run_single_agent", "run_swarm", "run_fallback"}
+        for event in events
+    ):
+        return "consulting"
+    if any(
+        str(event.get("stage") or "") in {"planning", "constraint_check"}
+        for event in events
+    ):
+        return "planning"
+    if any(_public_phase_for_event(event) == "understanding" for event in events):
+        return "planning"
+    return "understanding"
+
+
+def _planned_public_agent_ids(events: List[Dict[str, Any]]) -> List[str]:
+    planned: List[str] = []
+    for event in events:
+        name = str(event.get("name") or "")
+        output = event.get("output")
+        tasks: Any = None
+        if name == "subtasks_created" and isinstance(output, list):
+            tasks = output
+        elif name == "route_plan" and isinstance(output, dict):
+            tasks = output.get("tasks")
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            agent_id = task.get("assigned_agent")
+            if isinstance(agent_id, str) and agent_id in PUBLIC_AGENT_ROLES:
+                planned.append(agent_id)
+    return list(dict.fromkeys(planned))
+
+
+def _public_safety_checked(events: List[Dict[str, Any]]) -> bool:
+    for event in reversed(events):
+        if str(event.get("stage") or "") != "safety_check":
+            continue
+        output = event.get("output")
+        if isinstance(output, dict) and output.get("safety_checked") is True:
+            return True
+    return False
+
+
+def _find_public_risk_level(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        raw = value.get("risk_level")
+        if isinstance(raw, str) and raw.lower() in {
+            "low",
+            "medium",
+            "high",
+            "emergency",
+        }:
+            return raw.lower()
+        for child in value.values():
+            found = _find_public_risk_level(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = _find_public_risk_level(child)
+            if found:
+                return found
+    return None
+
+
+def _string_list(value: Any) -> List[str]:
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
 def _short_term_memory(request: Request) -> ShortTermMemory:

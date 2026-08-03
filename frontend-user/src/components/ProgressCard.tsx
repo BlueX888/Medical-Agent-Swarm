@@ -1,60 +1,103 @@
-import { RunProgress } from "../types";
+import {
+  Check,
+  Circle,
+  HeartHandshake,
+  Microscope,
+  ShieldCheck,
+  Stethoscope
+} from "lucide-react";
+import {
+  ConsultationParticipant,
+  ConsultationPhase,
+  ConsultationSnapshot
+} from "../types";
 
-// 后端 LangGraph 各节点的 stage 顺序，见 swarm/medical_swarm_graph.py 的 _trace_node 注册。
-const STAGE_ORDER = [
-  "load_memory",
-  "planning",
-  "routing",
-  "agent_loop",
-  "safety_check",
-  "save_memory"
+const PHASES: Array<{ id: ConsultationPhase; label: string }> = [
+  { id: "understanding", label: "理解你的描述" },
+  { id: "planning", label: "制定会诊路径" },
+  { id: "consulting", label: "协作分析" },
+  { id: "safety_review", label: "安全复核" },
+  { id: "finalizing", label: "整理行动建议" }
+];
+
+const ROLE_SLOTS = [
+  { id: "health_consultation", label: "健康咨询", description: "整理问题与日常建议", icon: HeartHandshake },
+  { id: "symptom_analysis", label: "风险与症状分析", description: "识别风险与就医时机", icon: Stethoscope },
+  { id: "evidence_research", label: "医学证据检索", description: "按需核对医学资料", icon: Microscope }
 ] as const;
 
-function stageLabel(stage: string, agentCount: number): string {
-  switch (stage) {
-    case "load_memory":
-      return "正在回顾你之前的对话";
-    case "planning":
-      return "正在理解你的描述";
-    case "routing":
-      return "正在安排合适的分析角色";
-    case "agent_loop":
-      return agentCount > 1 ? `${agentCount} 位智能体协作分析中` : "智能体分析中";
-    case "save_memory":
-      return "正在记录本次咨询";
-    case "safety_check":
-      return "正在做最后的安全检查";
-    default:
-      return "处理中";
-  }
+function participantState(
+  participants: ConsultationParticipant[],
+  id: string
+): ConsultationParticipant["state"] {
+  return participants.find((participant) => participant.id === id)?.state ?? "waiting";
 }
 
-export function ProgressCard({ progress }: { progress: RunProgress }) {
-  const seen = STAGE_ORDER.filter((stage) => progress.stagesSeen.includes(stage));
-  const activeStage = seen[seen.length - 1] ?? STAGE_ORDER[0];
+export function ProgressCard({ snapshot }: { snapshot: ConsultationSnapshot | null }) {
+  const progress = snapshot?.progress;
+  const isRunning = snapshot?.status === "queued" || snapshot?.status === "running";
+  const statusCopy = isRunning
+    ? "会诊进行中"
+    : snapshot?.status === "success"
+      ? "本轮会诊已完成"
+      : snapshot?.status === "failed" || snapshot?.status === "timeout"
+        ? "本轮未完成"
+        : "提交问题后开始协作";
 
   return (
-    <div className="msg-row msg-row-assistant">
-      <div
-        className="bubble bubble-assistant progress-card"
-        aria-live="polite"
-        aria-busy="true"
-      >
-        <p className="progress-title">正在为你会诊</p>
-        <ol className="progress-timeline">
-          {STAGE_ORDER.map((stage) => {
-            const isSeen = seen.includes(stage);
-            const isActive = stage === activeStage;
-            const state = isActive ? "active" : isSeen ? "done" : "todo";
+    <section className="consultation-rail" aria-label="会诊路径" aria-live="polite">
+      <div className="rail-heading">
+        <div>
+          <p className="section-eyebrow">Consultation path</p>
+          <h2>会诊路径</h2>
+        </div>
+        <span className={`rail-status${isRunning ? " is-active" : ""}`}>{statusCopy}</span>
+      </div>
+
+      <ol className="phase-list">
+        {PHASES.map((phase) => {
+          const done = progress?.completed_phases.includes(phase.id) ?? false;
+          const active = isRunning && progress?.current_phase === phase.id;
+          return (
+            <li key={phase.id} className={`phase-item${done ? " is-done" : ""}${active ? " is-active" : ""}`}>
+              <span className="phase-marker" aria-hidden="true">
+                {done ? <Check size={12} /> : <Circle size={9} />}
+              </span>
+              <span>{phase.label}</span>
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="role-section">
+        <p className="rail-subtitle">协作角色</p>
+        <div className="role-list">
+          {ROLE_SLOTS.map((role) => {
+            const state = participantState(progress?.participants ?? [], role.id);
+            const Icon = role.icon;
             return (
-              <li key={stage} className={`progress-step progress-${state}`}>
-                <span className="progress-dot" />
-                <span className="progress-label">{stageLabel(stage, progress.agentCount)}</span>
-              </li>
+              <div key={role.id} className={`role-card role-${state}`}>
+                <span className="role-icon"><Icon size={17} aria-hidden="true" /></span>
+                <span className="role-copy">
+                  <strong>{role.label}</strong>
+                  <small>{role.description}</small>
+                </span>
+                <span className="role-state">
+                  {state === "active" ? "分析中" : state === "done" ? "已完成" : state === "failed" ? "未完成" : "按需加入"}
+                </span>
+              </div>
             );
           })}
-        </ol>
+        </div>
       </div>
-    </div>
+
+      <div className={`safety-seal${progress?.safety_checked ? " is-checked" : ""}`}>
+        <ShieldCheck size={18} aria-hidden="true" />
+        <span>
+          <strong>{progress?.safety_checked ? "已完成安全复核" : "最终回答将经过安全复核"}</strong>
+          <small>检查急症提醒、过度诊断与用药风险</small>
+        </span>
+      </div>
+    </section>
   );
 }

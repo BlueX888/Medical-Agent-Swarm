@@ -20,6 +20,58 @@ class RunCreateResponse(BaseModel):
     run: Dict[str, Any]
 
 
+class ConsultationCreateRequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+    context: Dict[str, Any] = Field(default_factory=dict)
+    session_id: str = Field(..., min_length=1, max_length=200)
+
+
+class ConsultationCreateResponse(BaseModel):
+    consultation_id: str
+    status: Literal["queued", "running", "success", "failed", "timeout"]
+
+
+class ConsultationParticipant(BaseModel):
+    id: str
+    label: str
+    state: Literal["waiting", "active", "done", "failed"]
+
+
+class ConsultationProgress(BaseModel):
+    current_phase: Literal[
+        "understanding",
+        "planning",
+        "consulting",
+        "safety_review",
+        "finalizing",
+    ]
+    completed_phases: List[str] = Field(default_factory=list)
+    participants: List[ConsultationParticipant] = Field(default_factory=list)
+    safety_checked: bool = False
+
+
+class ConsultationResult(BaseModel):
+    answer: str
+    risk_level: Optional[Literal["low", "medium", "high", "emergency"]] = None
+    suggestions: List[str] = Field(default_factory=list)
+    disclaimer: str = ""
+    participants: List[str] = Field(default_factory=list)
+
+
+class ConsultationFailure(BaseModel):
+    code: Literal["analysis_failed", "analysis_timeout"]
+    message: str
+    retryable: bool = True
+
+
+class ConsultationSnapshot(BaseModel):
+    consultation_id: str
+    status: Literal["queued", "running", "success", "failed", "timeout"]
+    progress: ConsultationProgress
+    result: Optional[ConsultationResult] = None
+    failure: Optional[ConsultationFailure] = None
+
+
 class RunResumeRequest(BaseModel):
     checkpoint_id: Optional[str] = None
 

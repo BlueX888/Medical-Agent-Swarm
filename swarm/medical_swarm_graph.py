@@ -758,6 +758,7 @@ class MedicalSwarmGraph:
                         "suggestions": result.get("suggestions", []),
                         "disclaimer": result.get("disclaimer", ""),
                         "agents_involved": result.get("agents_involved", []),
+                        "safety_checked": bool(result.get("safety_checked")),
                     }
                     saved = await self.short_term_memory.save_turn(
                         session_id=state["session_id"],

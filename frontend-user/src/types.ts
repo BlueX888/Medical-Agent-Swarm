@@ -43,10 +43,25 @@ export interface ConsultationParticipant {
   state: "waiting" | "active" | "done" | "failed";
 }
 
+export type ConsultationAnalysisStepId =
+  | "risk"
+  | "focus"
+  | "evidence"
+  | "collaboration"
+  | "safety";
+
+export interface ConsultationAnalysisStep {
+  id: ConsultationAnalysisStepId;
+  label: string;
+  summary: string;
+  state: "pending" | "active" | "done" | "skipped" | "attention";
+}
+
 export interface ConsultationProgress {
   current_phase: ConsultationPhase;
   completed_phases: ConsultationPhase[];
   participants: ConsultationParticipant[];
+  analysis_steps?: ConsultationAnalysisStep[];
   safety_checked: boolean;
 }
 

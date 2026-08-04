@@ -66,6 +66,16 @@ PUBLIC_AGENT_ROLES = {
     "diagnostic_agent": ("symptom_analysis", "风险与症状分析"),
     "research_agent": ("evidence_research", "医学证据检索"),
 }
+PUBLIC_INTENT_LABELS = {
+    "symptom_triage": "风险与就医时机",
+    "diagnostic_reasoning": "可能原因与判断依据",
+    "treatment_guidance": "处理与治疗选择",
+    "medication_guidance": "用药信息与风险",
+    "prognosis_guidance": "恢复过程与预后",
+    "lifestyle_guidance": "可执行的生活调整",
+    "evidence_research": "医学资料与证据",
+    "general_consultation": "一般健康建议",
+}
 
 
 @asynccontextmanager
@@ -703,6 +713,7 @@ def _build_public_consultation_snapshot(
 
     result_json = run.get("result_json")
     result_data = result_json if isinstance(result_json, dict) else {}
+    safety_checked = _public_safety_checked(events)
     result = None
     failure = None
     if raw_status == "success":
@@ -744,7 +755,15 @@ def _build_public_consultation_snapshot(
             "current_phase": current_phase,
             "completed_phases": completed_phases,
             "participants": participants,
-            "safety_checked": _public_safety_checked(events),
+            "analysis_steps": _public_analysis_steps(
+                events=events,
+                current_phase=current_phase,
+                raw_status=raw_status,
+                participants=participants,
+                safety_checked=safety_checked,
+                result_data=result_data,
+            ),
+            "safety_checked": safety_checked,
         },
         "result": result,
         "failure": failure,
@@ -840,6 +859,148 @@ def _public_safety_checked(events: List[Dict[str, Any]]) -> bool:
         if isinstance(output, dict) and output.get("safety_checked") is True:
             return True
     return False
+
+
+def _public_analysis_steps(
+    *,
+    events: List[Dict[str, Any]],
+    current_phase: str,
+    raw_status: str,
+    participants: List[Dict[str, str]],
+    safety_checked: bool,
+    result_data: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """Build a patient-safe audit summary without exposing model reasoning or raw evidence."""
+    route_output = _latest_public_event_output(events, "route_plan")
+    knowledge_output = _latest_public_event_output(events, "retrieve_knowledge")
+
+    risk_level = _find_public_risk_level(route_output or {}) or _find_public_risk_level(
+        result_data
+    )
+    if risk_level in {"high", "emergency"}:
+        risk_summary = "已识别需要优先处理的高风险信号，将先给出就医时机建议。"
+        risk_state = "attention"
+    elif risk_level == "medium":
+        risk_summary = "已识别需要重点留意的风险因素，将说明观察与就医时机。"
+        risk_state = "attention"
+    elif risk_level == "low":
+        risk_summary = "当前信息未触发高风险路径，仍会保留症状加重时的就医提醒。"
+        risk_state = "done"
+    else:
+        risk_summary = "正在检查是否有需要优先处理的危险信号。"
+        risk_state = "active" if current_phase in {"understanding", "planning"} else "pending"
+
+    intent_labels: List[str] = []
+    raw_intents = route_output.get("intents") if isinstance(route_output, dict) else None
+    if isinstance(raw_intents, list):
+        for value in raw_intents:
+            label = PUBLIC_INTENT_LABELS.get(str(value))
+            if label and label not in intent_labels:
+                intent_labels.append(label)
+    if intent_labels:
+        focus_summary = f"本次重点：{'、'.join(intent_labels)}。"
+        focus_state = "done"
+    else:
+        focus_summary = "正在识别问题重点和需要回答的范围。"
+        focus_state = "active" if current_phase in {"understanding", "planning"} else "pending"
+
+    knowledge_status = str(knowledge_output.get("status") or "")
+    knowledge_error = str(knowledge_output.get("error") or "")
+    if knowledge_status == "used":
+        source_count = max(0, _safe_public_int(knowledge_output.get("source_count")))
+        evidence_summary = f"已核对 {source_count} 条本地医学资料，并保留可引用来源。"
+        evidence_state = "done"
+    elif knowledge_status == "empty":
+        evidence_summary = "本地资料未找到足够匹配内容，回答不会生成知识库引用。"
+        evidence_state = "attention"
+    elif knowledge_status == "degraded":
+        evidence_summary = "医学资料库暂不可用，已降级为基础分析流程。"
+        evidence_state = "attention"
+    elif knowledge_status == "skipped" and knowledge_error == "urgent_request":
+        evidence_summary = "为避免延误高风险处置，本次跳过资料检索。"
+        evidence_state = "skipped"
+    elif knowledge_status == "skipped":
+        evidence_summary = "本次问题不需要调用医学资料库。"
+        evidence_state = "skipped"
+    elif knowledge_status == "disabled":
+        evidence_summary = "本次未启用医学资料检索。"
+        evidence_state = "skipped"
+    else:
+        evidence_summary = "正在判断是否需要核对本地医学资料。"
+        evidence_state = "active" if current_phase in {"planning", "consulting"} else "pending"
+
+    participant_labels = [
+        str(participant.get("label"))
+        for participant in participants
+        if participant.get("label")
+    ]
+    participant_states = {str(participant.get("state")) for participant in participants}
+    if participant_labels:
+        collaboration_summary = (
+            f"已安排 {len(participant_labels)} 个分析角色：{'、'.join(participant_labels)}。"
+        )
+        if "failed" in participant_states:
+            collaboration_state = "attention"
+        elif raw_status == "success" or participant_states <= {"done"}:
+            collaboration_state = "done"
+        elif "active" in participant_states:
+            collaboration_state = "active"
+        else:
+            collaboration_state = "pending"
+    else:
+        collaboration_summary = "正在按问题类型安排合适的分析角色。"
+        collaboration_state = "active" if current_phase == "planning" else "pending"
+
+    if safety_checked:
+        safety_summary = "已检查急症提醒、过度诊断和用药风险。"
+        safety_state = "done"
+    elif raw_status in {"failed", "timeout"}:
+        safety_summary = "本轮安全复核未完成，不会把未核对内容标记为已通过。"
+        safety_state = "attention"
+    elif current_phase in {"safety_review", "finalizing"}:
+        safety_summary = "正在检查急症提醒、过度诊断和用药风险。"
+        safety_state = "active"
+    else:
+        safety_summary = "回答生成后将检查急症提醒、过度诊断和用药风险。"
+        safety_state = "pending"
+
+    return [
+        {"id": "risk", "label": "风险预检", "summary": risk_summary, "state": risk_state},
+        {"id": "focus", "label": "本次重点", "summary": focus_summary, "state": focus_state},
+        {
+            "id": "evidence",
+            "label": "资料核对",
+            "summary": evidence_summary,
+            "state": evidence_state,
+        },
+        {
+            "id": "collaboration",
+            "label": "协作分工",
+            "summary": collaboration_summary,
+            "state": collaboration_state,
+        },
+        {"id": "safety", "label": "安全复核", "summary": safety_summary, "state": safety_state},
+    ]
+
+
+def _latest_public_event_output(
+    events: List[Dict[str, Any]],
+    name: str,
+) -> Dict[str, Any]:
+    for event in reversed(events):
+        if str(event.get("name") or "") != name:
+            continue
+        output = event.get("output")
+        if isinstance(output, dict):
+            return output
+    return {}
+
+
+def _safe_public_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _find_public_risk_level(value: Any) -> Optional[str]:

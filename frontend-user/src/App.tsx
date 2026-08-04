@@ -15,6 +15,7 @@ import {
 } from "./api/client";
 import { Composer } from "./components/Composer";
 import { ChatMessageView } from "./components/ChatMessage";
+import { LiveAnalysisCard } from "./components/LiveAnalysisCard";
 import { ProfileCard } from "./components/ProfileCard";
 import { ProgressCard } from "./components/ProgressCard";
 import {
@@ -355,7 +356,7 @@ function App() {
         {
           id: `assistant-create-error-${Date.now()}`,
           role: "assistant",
-          content: "暂时无法开始会诊。请检查连接后重试；如症状严重或正在加重，请及时线下就医。",
+          content: "暂时无法开始分析。请检查连接后重试；如症状严重或正在加重，请及时线下就医。",
           retryQuestion: normalized,
           payload: {
             riskLevel: null,
@@ -486,6 +487,7 @@ function App() {
             {messages.map((message) => (
               <ChatMessageView key={message.id} message={message} onRetry={retryQuestion} />
             ))}
+            {isBusy && <div className="desktop-live-analysis"><LiveAnalysisCard snapshot={snapshot} /></div>}
             {(snapshot || isBusy) && <div className="mobile-progress"><ProgressCard snapshot={snapshot} /></div>}
             <div ref={bottomRef} />
           </main>

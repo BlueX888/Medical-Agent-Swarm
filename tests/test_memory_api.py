@@ -367,7 +367,16 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
 
     assert allowed.status_code == 200
     payload = allowed.json()
-    assert payload == {
+    analysis_steps = payload["progress"]["analysis_steps"]
+    payload_without_analysis = {
+        **payload,
+        "progress": {
+            key: value
+            for key, value in payload["progress"].items()
+            if key != "analysis_steps"
+        },
+    }
+    assert payload_without_analysis == {
         "consultation_id": "public-consultation-success",
         "status": "success",
         "progress": {
@@ -398,12 +407,122 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
             },
         "failure": None,
     }
+    assert analysis_steps[0] == {
+        "id": "risk",
+        "label": "风险预检",
+        "summary": "已识别需要优先处理的高风险信号，将先给出就医时机建议。",
+        "state": "attention",
+    }
+    assert analysis_steps[-1] == {
+        "id": "safety",
+        "label": "安全复核",
+        "summary": "已检查急症提醒、过度诊断和用药风险。",
+        "state": "done",
+    }
     assert wrong_session.status_code == 404
     assert missing_session.status_code == 404
     serialized = repr(payload)
     assert "sensitive" not in serialized
     assert "private" not in serialized
     assert "diagnostic_agent" not in serialized
+
+
+def test_public_consultation_exposes_a_safe_structured_analysis_summary(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private patient question",
+        session_id="session-analysis-summary",
+        run_id="public-analysis-summary",
+        metadata={"source": "consultation_api"},
+    )
+    collector.record_event(
+        "planning",
+        name="route_plan",
+        output={
+            "intents": ["lifestyle_guidance", "symptom_triage"],
+            "risk_level": "low",
+            "private_reasoning": "never expose this chain of thought",
+            "tasks": [
+                {
+                    "assigned_agent": "consultation_agent",
+                    "goal": "private task instructions",
+                },
+                {
+                    "assigned_agent": "research_agent",
+                    "goal": "private task instructions",
+                },
+            ],
+        },
+    )
+    collector.record_event(
+        "knowledge_retrieval",
+        name="retrieve_knowledge",
+        output={
+            "status": "used",
+            "candidate_count": 12,
+            "source_count": 3,
+            "private_chunks": ["never expose retrieved text"],
+        },
+    )
+    collector.record_event("routing", name="route_by_subtasks")
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-analysis-summary",
+            headers={"X-Session-ID": "session-analysis-summary"},
+        )
+
+    assert response.status_code == 200
+    steps = response.json()["progress"]["analysis_steps"]
+    assert steps == [
+        {
+            "id": "risk",
+            "label": "风险预检",
+            "summary": "当前信息未触发高风险路径，仍会保留症状加重时的就医提醒。",
+            "state": "done",
+        },
+        {
+            "id": "focus",
+            "label": "本次重点",
+            "summary": "本次重点：可执行的生活调整、风险与就医时机。",
+            "state": "done",
+        },
+        {
+            "id": "evidence",
+            "label": "资料核对",
+            "summary": "已核对 3 条本地医学资料，并保留可引用来源。",
+            "state": "done",
+        },
+        {
+            "id": "collaboration",
+            "label": "协作分工",
+            "summary": "已安排 2 个分析角色：健康咨询、医学证据检索。",
+            "state": "active",
+        },
+        {
+            "id": "safety",
+            "label": "安全复核",
+            "summary": "回答生成后将检查急症提醒、过度诊断和用药风险。",
+            "state": "pending",
+        },
+    ]
+    serialized = repr(response.json())
+    assert "private" not in serialized
+    assert "chain of thought" not in serialized
+    assert "retrieved text" not in serialized
 
 
 def test_public_consultation_can_be_created_without_exposing_debug_run(
@@ -570,7 +689,13 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         )
 
     assert running_response.status_code == 200
-    assert running_response.json()["progress"] == {
+    running_progress = running_response.json()["progress"]
+    running_analysis = running_progress["analysis_steps"]
+    assert {
+        key: value
+        for key, value in running_progress.items()
+        if key != "analysis_steps"
+    } == {
         "current_phase": "consulting",
         "completed_phases": ["understanding", "planning"],
         "participants": [
@@ -579,13 +704,23 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         ],
         "safety_checked": False,
     }
+    assert next(step for step in running_analysis if step["id"] == "collaboration") == {
+        "id": "collaboration",
+        "label": "协作分工",
+        "summary": "已安排 2 个分析角色：健康咨询、医学证据检索。",
+        "state": "active",
+    }
     assert single_response.status_code == 200
     assert single_response.json()["progress"]["participants"] == [
         {"id": "symptom_analysis", "label": "风险与症状分析", "state": "active"}
     ]
     failure = failed_response.json()
     assert failure["status"] == "failed"
-    assert failure["progress"] == {
+    assert {
+        key: value
+        for key, value in failure["progress"].items()
+        if key != "analysis_steps"
+    } == {
         "current_phase": "consulting",
         "completed_phases": ["understanding", "planning"],
         "participants": [

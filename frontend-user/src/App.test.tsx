@@ -65,7 +65,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "胸痛并且呼吸困难");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
 
     expect(await screen.findByText("请立即联系急救服务。")).toBeInTheDocument();
     expect(screen.getByText("急症警示")).toBeInTheDocument();
@@ -124,7 +124,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "持续头晕两天");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
 
     expect((await screen.findAllByText("分析中")).length).toBeGreaterThan(0);
     expect(await screen.findByText("分析已经完成。")).toBeInTheDocument();
@@ -173,7 +173,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "持续头痛");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
     await user.click(await screen.findByRole("button", { name: "重新分析" }));
 
     expect(await screen.findByText("重新分析已完成。")).toBeInTheDocument();

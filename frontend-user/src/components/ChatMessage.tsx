@@ -65,7 +65,7 @@ export function ChatMessageView({ message, onRetry }: Props) {
         <article className="bubble bubble-assistant failure-card" aria-label="分析服务提示">
           <div className="failure-heading">
             <AlertTriangle size={18} aria-hidden="true" />
-            <strong>{payload.timedOut ? "分析时间较长" : "本轮会诊未完成"}</strong>
+            <strong>{payload.timedOut ? "分析时间较长" : "本轮分析未完成"}</strong>
           </div>
           <p>{message.content}</p>
           {message.retryQuestion && onRetry && (
@@ -83,8 +83,8 @@ export function ChatMessageView({ message, onRetry }: Props) {
       <article className="bubble bubble-assistant result-card" aria-label="健康助手回复">
         <header className="result-heading">
           <div>
-            <p className="section-eyebrow">Consultation note</p>
-            <h2>会诊建议</h2>
+            <p className="section-eyebrow">Analysis note</p>
+            <h2>分析建议</h2>
           </div>
           <button type="button" className="copy-button" onClick={copyAnswer}>
             {copied ? <Check size={15} /> : <Clipboard size={15} />}

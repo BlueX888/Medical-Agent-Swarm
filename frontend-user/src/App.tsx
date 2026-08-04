@@ -150,7 +150,7 @@ function buildAssistantMessage(snapshot: ConsultationSnapshot): ChatMessage {
   return {
     id: `assistant-${snapshot.consultation_id}`,
     role: "assistant",
-    content: snapshot.failure?.message ?? "本轮会诊未能完成，请重新尝试。",
+    content: snapshot.failure?.message ?? "本轮分析未能完成，请重新尝试。",
     payload: {
       riskLevel: null,
       suggestions: [],

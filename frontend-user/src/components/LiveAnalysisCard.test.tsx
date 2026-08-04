@@ -46,4 +46,39 @@ describe("live analysis card", () => {
     expect(screen.getByText("1 项已确认")).toBeInTheDocument();
     expect(screen.getByText("展示结构化进度，不展示模型内部思维记录")).toBeInTheDocument();
   });
+
+  it("keeps a completed warning separate from the current pending step", () => {
+    const snapshot: ConsultationSnapshot = {
+      consultation_id: "consultation-warning",
+      status: "running",
+      progress: {
+        current_phase: "safety_review",
+        completed_phases: ["understanding", "planning", "consulting"],
+        participants: [],
+        analysis_steps: [
+          {
+            id: "risk",
+            label: "风险预检",
+            summary: "已识别需要重点留意的风险因素。",
+            state: "attention"
+          },
+          {
+            id: "safety",
+            label: "安全复核",
+            summary: "正在等待最终安全复核。",
+            state: "pending"
+          }
+        ],
+        safety_checked: false
+      },
+      result: null,
+      failure: null
+    };
+
+    render(<LiveAnalysisCard snapshot={snapshot} />);
+
+    expect(screen.getByText("安全复核")).toBeInTheDocument();
+    expect(screen.getByText("正在等待最终安全复核。")).toBeInTheDocument();
+    expect(screen.queryByText("已识别需要重点留意的风险因素。")).not.toBeInTheDocument();
+  });
 });

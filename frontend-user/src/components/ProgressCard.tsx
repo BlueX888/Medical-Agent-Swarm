@@ -92,11 +92,11 @@ export function ProgressCard({ snapshot }: { snapshot: ConsultationSnapshot | nu
         })}
       </ol>
 
-      <section className="analysis-receipt" aria-labelledby="analysis-receipt-title">
+      <section className="analysis-receipt" aria-label="本次分析摘要">
         <div className="analysis-receipt-heading">
           <span className="analysis-receipt-icon" aria-hidden="true"><ListChecks size={16} /></span>
           <div>
-            <h3 id="analysis-receipt-title">本次分析摘要</h3>
+            <h3>本次分析摘要</h3>
             <p>这里展示可核验的步骤与结论，不包含模型内部思维记录。</p>
           </div>
         </div>

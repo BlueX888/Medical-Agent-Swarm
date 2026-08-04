@@ -323,7 +323,10 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
     collector.record_event(
         "planning",
         name="route_plan",
-        output={"private_reasoning": "must never be public"},
+        output={
+            "risk_level": "low",
+            "private_reasoning": "must never be public",
+        },
     )
     collector.record_event(
         "agent_loop",
@@ -502,9 +505,9 @@ def test_public_consultation_exposes_a_safe_structured_analysis_summary(
         },
         {
             "id": "evidence",
-            "label": "资料核对",
-            "summary": "已核对 3 条本地医学资料，并保留可引用来源。",
-            "state": "done",
+            "label": "资料与引用",
+            "summary": "已检索 3 条候选资料，引用将在回答完成时校验。",
+            "state": "active",
         },
         {
             "id": "collaboration",
@@ -523,6 +526,137 @@ def test_public_consultation_exposes_a_safe_structured_analysis_summary(
     assert "private" not in serialized
     assert "chain of thought" not in serialized
     assert "retrieved text" not in serialized
+
+
+def test_public_consultation_reports_only_grounded_citations_as_complete(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private evidence question",
+        session_id="session-grounded-summary",
+        run_id="public-grounded-summary",
+        metadata={"source": "consultation_api"},
+    )
+    collector.record_event(
+        "planning",
+        name="route_plan",
+        output={
+            "risk_level": "low",
+            "intents": ["evidence_research"],
+            "tasks": [{"assigned_agent": "research_agent"}],
+        },
+    )
+    collector.record_event(
+        "knowledge_retrieval",
+        name="retrieve_knowledge",
+        output={"status": "used", "source_count": 3},
+    )
+    collector.record_event(
+        "agent_loop",
+        name="agent_loop",
+        agent_id="research_agent",
+        output={"private_answer": "never expose"},
+    )
+    collector.record_event(
+        "rag_grounding",
+        name="ground_and_cite",
+        output={"used_sources": 2, "repaired": True},
+    )
+    collector.record_event(
+        "safety_check",
+        name="runtime_safety_guard",
+        output={"safety_checked": True},
+    )
+    collector.finish_success(
+        result_json={
+            "answer": "已完成引用校验 [K1] [K2]。",
+            "risk_level": "low",
+            "agents_involved": ["research_agent"],
+            "sources": [
+                {"citation_id": "K1", "title": "资料一"},
+                {"citation_id": "K2", "title": "资料二"},
+            ],
+        },
+        final_answer="已完成引用校验 [K1] [K2]。",
+    )
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-grounded-summary",
+            headers={"X-Session-ID": "session-grounded-summary"},
+        )
+
+    assert response.status_code == 200
+    evidence = next(
+        step
+        for step in response.json()["progress"]["analysis_steps"]
+        if step["id"] == "evidence"
+    )
+    assert evidence == {
+        "id": "evidence",
+        "label": "资料与引用",
+        "summary": "已引用 2 条本地医学资料，并完成引用校验。",
+        "state": "done",
+    }
+    assert "private" not in repr(response.json())
+
+
+def test_public_success_without_safety_proof_never_reports_an_active_review(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private question",
+        session_id="session-no-safety-proof",
+        run_id="public-no-safety-proof",
+        metadata={"source": "consultation_api"},
+    )
+    collector.finish_success(
+        result_json={"answer": "回答已生成。", "risk_level": "low"},
+        final_answer="回答已生成。",
+    )
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-no-safety-proof",
+            headers={"X-Session-ID": "session-no-safety-proof"},
+        )
+
+    assert response.status_code == 200
+    safety = next(
+        step
+        for step in response.json()["progress"]["analysis_steps"]
+        if step["id"] == "safety"
+    )
+    assert safety == {
+        "id": "safety",
+        "label": "安全复核",
+        "summary": "未记录完成安全复核，不能把本轮回答标记为已通过。",
+        "state": "attention",
+    }
 
 
 def test_public_consultation_can_be_created_without_exposing_debug_run(
@@ -644,6 +778,11 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
     )
     failed.record_event("routing", name="route_by_subtasks")
     failed.record_event(
+        "rag_grounding",
+        name="ground_and_cite",
+        output={"used_sources": 2, "repaired": False},
+    )
+    failed.record_event(
         "agent_loop",
         name="run_single_agent",
         status="failed",
@@ -734,6 +873,20 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         "message": "本次分析未能完成，请重新尝试；如症状严重或正在加重，请及时线下就医。",
         "retryable": True,
     }
+    assert all(
+        step["state"] != "active"
+        for step in failure["progress"]["analysis_steps"]
+    )
+    assert next(
+        step
+        for step in failure["progress"]["analysis_steps"]
+        if step["id"] == "evidence"
+    ) == {
+        "id": "evidence",
+        "label": "资料与引用",
+        "summary": "本轮未完成资料与引用核对。",
+        "state": "attention",
+    }
     assert "credential" not in repr(failure)
     assert "stack trace" not in repr(failure)
     assert "worker failure" not in repr(failure)
@@ -746,6 +899,10 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         "consulting",
     ]
     assert timeout["progress"]["safety_checked"] is False
+    assert all(
+        step["state"] != "active"
+        for step in timeout["progress"]["analysis_steps"]
+    )
     assert timeout["result"] is None
     assert timeout["failure"]["code"] == "analysis_timeout"
     assert timeout["failure"]["retryable"] is True

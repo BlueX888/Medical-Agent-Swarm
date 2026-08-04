@@ -14,7 +14,6 @@ function currentAnalysisStep(
 ): ConsultationAnalysisStep | undefined {
   return (
     steps.find((step) => step.state === "active") ??
-    steps.find((step) => step.state === "attention") ??
     steps.find((step) => step.state === "pending")
   );
 }
@@ -23,6 +22,7 @@ export function LiveAnalysisCard({ snapshot }: { snapshot: ConsultationSnapshot 
   const progress = snapshot?.progress;
   const steps = progress?.analysis_steps ?? [];
   const current = currentAnalysisStep(steps);
+  const currentIndex = current ? steps.indexOf(current) + 1 : 1;
   const confirmed = steps.filter((step) => step.state === "done").length;
   const phaseCopy = progress
     ? PHASE_COPY[progress.current_phase]
@@ -40,7 +40,7 @@ export function LiveAnalysisCard({ snapshot }: { snapshot: ConsultationSnapshot 
       </div>
 
       <div className="live-analysis-current">
-        <span className="live-analysis-index" aria-hidden="true">{Math.min(steps.indexOf(current as ConsultationAnalysisStep) + 1 || 1, 5)}</span>
+        <span className="live-analysis-index" aria-hidden="true">{Math.min(currentIndex, 5)}</span>
         <div>
           <strong>{current?.label ?? "准备分析"}</strong>
           <p>{current?.summary ?? phaseCopy}</p>

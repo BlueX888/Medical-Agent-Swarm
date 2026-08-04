@@ -30,9 +30,9 @@ describe("patient-facing analysis progress", () => {
           },
           {
             id: "evidence",
-            label: "资料核对",
-            summary: "已核对 3 条本地医学资料，并保留可引用来源。",
-            state: "done"
+            label: "资料与引用",
+            summary: "已检索 3 条候选资料，引用将在回答完成时校验。",
+            state: "active"
           },
           {
             id: "collaboration",
@@ -57,8 +57,20 @@ describe("patient-facing analysis progress", () => {
 
     expect(screen.getByRole("heading", { name: "分析进度" })).toBeInTheDocument();
     expect(screen.getByText("本次分析摘要")).toBeInTheDocument();
-    expect(screen.getByText("已核对 3 条本地医学资料，并保留可引用来源。")).toBeInTheDocument();
+    expect(screen.getByText("已检索 3 条候选资料，引用将在回答完成时校验。")).toBeInTheDocument();
     expect(screen.getByText("这里展示可核验的步骤与结论，不包含模型内部思维记录。")).toBeInTheDocument();
     expect(screen.queryByText(/private|chain of thought/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps analysis receipt labels unique when desktop and mobile cards coexist", () => {
+    const { container } = render(
+      <>
+        <ProgressCard snapshot={null} />
+        <ProgressCard snapshot={null} />
+      </>
+    );
+
+    expect(screen.getAllByRole("region", { name: "本次分析摘要" })).toHaveLength(2);
+    expect(container.querySelectorAll("#analysis-receipt-title")).toHaveLength(0);
   });
 });

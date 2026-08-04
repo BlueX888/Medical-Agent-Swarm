@@ -8,6 +8,7 @@ from constraints import ConstraintValidator
 from core.medical_safety_rules import _has_emergency_signal
 
 from .agent_catalog import AgentCatalog
+from .rag_policy import normalize_knowledge_need
 from .routing_models import (
     ExecutionMode,
     IntentType,
@@ -121,6 +122,15 @@ class RoutePlanValidator:
             else plan.risk_level
         )
         high_risk = effective_risk in {RiskLevel.HIGH, RiskLevel.EMERGENCY}
+        knowledge_need = normalize_knowledge_need(
+            intents=plan.intents,
+            risk_level=effective_risk,
+            declared_need=plan.knowledge_need,
+            needs_clarification=plan.needs_clarification,
+            question=question,
+        )
+        if plan.knowledge_need not in {None, knowledge_need}:
+            repairs.append("Normalized knowledge need to enforce retrieval policy")
         if high_risk:
             risk = effective_risk
             if safety.risk_level in {RiskLevel.HIGH, RiskLevel.EMERGENCY}:
@@ -223,6 +233,7 @@ class RoutePlanValidator:
             source=source,
             reasons=list(dict.fromkeys(reasons)),
             needs_clarification=plan.needs_clarification,
+            knowledge_need=knowledge_need,
         )
 
     @staticmethod
@@ -285,4 +296,15 @@ def fallback_plan(
         source=RouteSource.FALLBACK,
         reasons=[reason, *safety.reasons],
         needs_clarification=False,
+        knowledge_need=normalize_knowledge_need(
+            intents=[
+                IntentType.SYMPTOM_TRIAGE
+                if high_risk
+                else IntentType.GENERAL_CONSULTATION
+            ],
+            risk_level=safety.risk_level,
+            declared_need=None,
+            needs_clarification=False,
+            question=question,
+        ),
     )

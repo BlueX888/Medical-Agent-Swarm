@@ -48,6 +48,7 @@ from .routing_models import (
     RoutePlan,
     RouteSource,
 )
+from .rag_policy import decide_rag_route
 from .shared_context import SharedContext
 
 
@@ -489,6 +490,7 @@ class MedicalSwarmGraph:
             "confidence": route_plan.confidence,
             "execution_mode": route_plan.execution_mode.value,
             "source": route_plan.source.value,
+            "knowledge_need": route_plan.knowledge_need.value,
         }
 
         collector = self._get_debug_collector(state)
@@ -532,17 +534,15 @@ class MedicalSwarmGraph:
         """Retrieve trusted context after routing risk is known and before Worker execution."""
         route_plan = self._route_plan_from_state(state)
         enabled = bool(state.get("enable_rag", self.enable_rag)) and self.knowledge_base is not None
-        skip_reason = None
-        if not enabled:
-            status = "disabled"
-        elif route_plan.risk_level in {RiskLevel.HIGH, RiskLevel.EMERGENCY}:
-            status, skip_reason = "skipped", "urgent_request"
-        elif route_plan.needs_clarification:
-            status, skip_reason = "skipped", "clarification_required"
-        elif set(route_plan.intents) == {IntentType.SYMPTOM_TRIAGE}:
-            status, skip_reason = "skipped", "pure_symptom_triage"
-        else:
-            status = "retrieve"
+        decision = decide_rag_route(
+            enabled=enabled,
+            intents=route_plan.intents,
+            risk_level=route_plan.risk_level,
+            declared_need=route_plan.knowledge_need,
+            needs_clarification=route_plan.needs_clarification,
+            question=state["question"],
+        )
+        status, skip_reason = decision.status, decision.reason
 
         if status == "retrieve":
             bundle = await self.knowledge_base.retrieve(state["question"])
@@ -563,7 +563,16 @@ class MedicalSwarmGraph:
             collector.record_event(
                 "knowledge_retrieval",
                 name="retrieve_knowledge",
-                input={"enabled": enabled, "risk_level": route_plan.risk_level.value},
+                input={
+                    "enabled": enabled,
+                    "risk_level": route_plan.risk_level.value,
+                    "knowledge_need": (
+                        route_plan.knowledge_need.value
+                        if route_plan.knowledge_need is not None
+                        else "auto"
+                    ),
+                    "needs_clarification": route_plan.needs_clarification,
+                },
                 output={
                     "status": bundle.status,
                     "candidate_count": bundle.candidate_count,

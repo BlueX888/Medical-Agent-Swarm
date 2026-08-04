@@ -8,9 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class IntentType(str, Enum):
+    NON_MEDICAL = "non_medical"
+    SYSTEM_OPERATION = "system_operation"
     GENERAL_CONSULTATION = "general_consultation"
     SYMPTOM_TRIAGE = "symptom_triage"
     DIAGNOSTIC_REASONING = "diagnostic_reasoning"
+    TREATMENT_GUIDANCE = "treatment_guidance"
+    MEDICATION_GUIDANCE = "medication_guidance"
+    PROGNOSIS_GUIDANCE = "prognosis_guidance"
     LIFESTYLE_GUIDANCE = "lifestyle_guidance"
     EVIDENCE_RESEARCH = "evidence_research"
 
@@ -21,6 +26,13 @@ class RiskLevel(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     EMERGENCY = "emergency"
+
+
+class KnowledgeNeed(str, Enum):
+    """Whether the planned answer will make evidence-backed medical claims."""
+
+    REQUIRED = "required"
+    NONE = "none"
 
 
 class ExecutionMode(str, Enum):
@@ -84,6 +96,15 @@ class RoutePlan(BaseModel):
     source: RouteSource
     reasons: List[str]
     needs_clarification: bool = False
+    knowledge_need: KnowledgeNeed | None = Field(
+        default=None,
+        description=(
+            "Use required when the answer will contain medical facts, causes, diagnosis, "
+            "treatment, medication, prognosis, lifestyle advice, monitoring, or care timing. "
+            "Use none only for emergency routing, pure clarification, non-medical conversation, "
+            "or application/system operations."
+        ),
+    )
 
     @field_validator("intent_summary")
     @classmethod

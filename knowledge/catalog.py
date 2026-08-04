@@ -151,6 +151,20 @@ class KnowledgeCatalog:
             value["payload"] = json.loads(value["payload"])
         return value
 
+    async def find_active_job(
+        self,
+        document_id: str,
+        operation: str,
+    ) -> Optional[Dict[str, Any]]:
+        value = await self._fetch_one(
+            "SELECT * FROM jobs WHERE document_id=? AND operation=? "
+            "AND status IN ('queued','indexing') ORDER BY created_at DESC LIMIT 1",
+            (document_id, operation),
+        )
+        if value:
+            value["payload"] = json.loads(value.get("payload") or "{}")
+        return value
+
     async def update_job(self, job_id: str, **changes: Any) -> None:
         changes["updated_at"] = _now()
         await self._execute(
@@ -224,6 +238,9 @@ class KnowledgeCatalog:
                     PRIMARY KEY(document_id, version)
                 );
                 CREATE INDEX IF NOT EXISTS idx_jobs_document ON jobs(document_id, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_medquad
+                ON jobs(document_id, operation)
+                WHERE operation='import_medquad' AND status IN ('queued','indexing');
                 CREATE INDEX IF NOT EXISTS idx_versions_checksum ON document_versions(checksum);
                 """
             )
@@ -245,6 +262,12 @@ class KnowledgeCatalog:
                     """
                 )
                 connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_medquad "
+                "ON jobs(document_id, operation) "
+                "WHERE operation='import_medquad' "
+                "AND status IN ('queued','indexing')"
+            )
 
     def _fetch_all_sync(self, sql: str, params: tuple) -> List[Dict[str, Any]]:
         with self._connect() as connection:

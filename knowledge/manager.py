@@ -19,6 +19,7 @@ from .documents import (
     validate_metadata,
 )
 from .models import KnowledgeChunk
+from .medquad import MEDQUAD_DOCUMENT_ID, MedQuADImporter
 from .settings import KnowledgeSettings
 
 
@@ -30,6 +31,12 @@ class KnowledgeManager:
         self.vector_store = vector_store
         self.embedder = embedder
         self.catalog = KnowledgeCatalog(settings.catalog_path)
+        self.medquad = MedQuADImporter(
+            settings=settings,
+            catalog=self.catalog,
+            vector_store=vector_store,
+            embedder=embedder,
+        )
 
     async def initialize(self) -> None:
         await self.catalog.initialize()
@@ -111,6 +118,10 @@ class KnowledgeManager:
             result = await self._process_reindex_job(job)
             self._log_ingestion_event(job, result, started_at)
             return result
+        if job["operation"] == "import_medquad":
+            result = await self.medquad.process(job)
+            self._log_ingestion_event(job, result, started_at)
+            return result
         current_document = await self.catalog.get_document(job["document_id"])
         document = dict(job["payload"].get("staged_document") or current_document or {})
         if not document:
@@ -183,6 +194,9 @@ class KnowledgeManager:
     async def list_documents(self):
         return await self.catalog.list_documents()
 
+    async def submit_medquad_import(self) -> Dict[str, Any]:
+        return await self.medquad.submit()
+
     async def delete_document(self, document_id: str) -> bool:
         document = await self.catalog.get_document(document_id)
         if not document:
@@ -226,17 +240,83 @@ class KnowledgeManager:
         await self.catalog.update_job(job["id"], status="indexing", error=None)
         try:
             chunks = []
+            document_chunk_counts = {}
+            medquad_manifest = None
             for document in await self.catalog.list_documents():
                 if document["status"] != "ready":
                     continue
+                if document["id"] == MEDQUAD_DOCUMENT_ID:
+                    current_version = next(
+                        (
+                            item
+                            for item in document.get("versions", [])
+                            if item["version"] == document["version"]
+                        ),
+                        {},
+                    )
+                    build = await asyncio.to_thread(
+                        self.medquad.build_chunks,
+                        self.settings.medquad_source_path,
+                        document["version"],
+                        "ready",
+                        (current_version.get("metadata") or {}).get("source_sha256"),
+                    )
+                    chunks.extend(build.chunks)
+                    document_chunk_counts[document["id"]] = len(build.chunks)
+                    medquad_manifest = (
+                        Path(document["file_path"]),
+                        document["version"],
+                        build,
+                        (current_version.get("metadata") or {}).get("source_sha256"),
+                    )
+                    continue
                 path = Path(document["file_path"])
-                chunks.extend(await self._build_chunks(document, path))
-            vectors = (
-                await asyncio.to_thread(self.embedder.embed_documents, [chunk.text for chunk in chunks])
-                if chunks
-                else []
-            )
-            await self.vector_store.replace_all(chunks, vectors)
+                document_chunks = await self._build_chunks(document, path)
+                chunks.extend(document_chunks)
+                document_chunk_counts[document["id"]] = len(document_chunks)
+            if not chunks:
+                await self.vector_store.replace_all([], [])
+            else:
+                batch_size = max(1, self.settings.medquad_batch_size)
+                rebuild_id = None
+                try:
+                    for start in range(0, len(chunks), batch_size):
+                        batch = chunks[start : start + batch_size]
+                        vectors = await asyncio.to_thread(
+                            self.embedder.embed_documents,
+                            [chunk.text for chunk in batch],
+                        )
+                        if rebuild_id is None:
+                            rebuild_id = await self.vector_store.start_rebuild(
+                                len(vectors[0])
+                            )
+                        await self.vector_store.upsert_rebuild(
+                            rebuild_id,
+                            batch,
+                            vectors,
+                        )
+                    await self.vector_store.finish_rebuild(rebuild_id)
+                except Exception:
+                    if rebuild_id is not None:
+                        await self.vector_store.abort_rebuild(rebuild_id)
+                    raise
+            for document_id, chunk_count in document_chunk_counts.items():
+                document = await self.catalog.get_document(document_id)
+                if document:
+                    await self.catalog.update_document(
+                        document_id,
+                        chunk_count=chunk_count,
+                    )
+                    await self.catalog.update_version(
+                        document_id,
+                        document["version"],
+                        chunk_count=chunk_count,
+                    )
+            if medquad_manifest and medquad_manifest[3]:
+                await asyncio.to_thread(
+                    self.medquad.write_manifest,
+                    *medquad_manifest,
+                )
             await self.catalog.update_job(job["id"], status="ready")
             return {"job_id": job["id"], "status": "ready", "chunk_count": len(chunks)}
         except Exception as exc:

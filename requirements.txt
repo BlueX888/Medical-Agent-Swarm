@@ -14,10 +14,11 @@ langsmith>=0.4.0
 # 搜索和研究
 requests==2.32.0
 beautifulsoup4==4.12.3
+defusedxml>=0.7.1,<1.0
 ddgs>=9.14.0
 pypdf>=5.0,<7.0
 python-multipart>=0.0.20,<1.0
-qdrant-client>=1.13,<2.0
+qdrant-client>=1.15,<1.17
 sentence-transformers>=3.4,<6.0
 
 # 数据处理

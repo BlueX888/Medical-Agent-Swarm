@@ -53,6 +53,15 @@ class FakeKnowledgeManager:
     async def reindex_all(self):
         return {"job_id": "reindex-1", "status": "queued"}
 
+    async def submit_medquad_import(self):
+        return {
+            "document_id": "medquad",
+            "job_id": "medquad-import-1",
+            "status": "queued",
+            "duplicate": False,
+            "version": "577bd37",
+        }
+
 
 def test_knowledge_admin_api_requires_token_and_manages_documents(monkeypatch, short_term_memory_factory):
     manager = FakeKnowledgeManager()
@@ -97,6 +106,14 @@ def test_knowledge_admin_api_requires_token_and_manages_documents(monkeypatch, s
             headers={"X-Knowledge-Admin-Token": "admin-secret"},
         )
         assert job.json()["status"] == "ready"
+
+        medquad = client.post(
+            "/api/admin/knowledge/imports/medquad",
+            headers={"X-Knowledge-Admin-Token": "admin-secret"},
+        )
+        assert medquad.status_code == 202
+        assert medquad.json()["document_id"] == "medquad"
+        assert medquad.json()["job_id"] == "medquad-import-1"
 
         deleted = client.delete(
             "/api/admin/knowledge/documents/doc-1",

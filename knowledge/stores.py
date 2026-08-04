@@ -14,6 +14,15 @@ class VectorStore(Protocol):
         self, document_id: str, version: str, previous_version: Optional[str]
     ) -> None: ...
     async def replace_all(self, chunks: Sequence[KnowledgeChunk], vectors: Sequence[Sequence[float]]) -> None: ...
+    async def start_rebuild(self, vector_size: int) -> str: ...
+    async def upsert_rebuild(
+        self,
+        rebuild_id: str,
+        chunks: Sequence[KnowledgeChunk],
+        vectors: Sequence[Sequence[float]],
+    ) -> None: ...
+    async def finish_rebuild(self, rebuild_id: str) -> None: ...
+    async def abort_rebuild(self, rebuild_id: str) -> None: ...
     async def health(self) -> Dict[str, Any]: ...
 
 
@@ -22,6 +31,7 @@ class InMemoryVectorStore:
 
     def __init__(self):
         self._values: Dict[str, tuple[KnowledgeChunk, List[float]]] = {}
+        self._rebuilds: Dict[str, Dict[str, tuple[KnowledgeChunk, List[float]]]] = {}
 
     async def upsert(self, chunks, vectors) -> None:
         for chunk, vector in zip(chunks, vectors):
@@ -59,6 +69,22 @@ class InMemoryVectorStore:
     async def replace_all(self, chunks, vectors) -> None:
         self._values = {}
         await self.upsert(chunks, vectors)
+
+    async def start_rebuild(self, vector_size: int) -> str:
+        rebuild_id = f"memory-{len(self._rebuilds) + 1}"
+        self._rebuilds[rebuild_id] = {}
+        return rebuild_id
+
+    async def upsert_rebuild(self, rebuild_id, chunks, vectors) -> None:
+        staged = self._rebuilds[rebuild_id]
+        for chunk, vector in zip(chunks, vectors):
+            staged[chunk.chunk_id] = (chunk, list(vector))
+
+    async def finish_rebuild(self, rebuild_id: str) -> None:
+        self._values = self._rebuilds.pop(rebuild_id)
+
+    async def abort_rebuild(self, rebuild_id: str) -> None:
+        self._rebuilds.pop(rebuild_id, None)
 
     async def health(self) -> Dict[str, Any]:
         return {"status": "ok", "backend": "memory", "vectors": len(self._values)}

@@ -19,6 +19,7 @@ class KnowledgeChunk:
     status: str = "ready"
     citation_id: str = ""
     score: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_payload(self) -> Dict[str, Any]:
         return asdict(self)

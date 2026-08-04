@@ -14,4 +14,9 @@ services:
     ports:
       - "127.0.0.1:6333:6333"
     volumes:
-      - ./.data/qdrant:/qdrant/storage
+      # A Docker-managed volume is required on Windows/WSL2. Host bind mounts
+      # are not fully POSIX-compatible and can corrupt Qdrant mmap payload data.
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  qdrant_data:

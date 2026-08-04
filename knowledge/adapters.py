@@ -7,7 +7,12 @@ import threading
 import uuid
 from typing import Any, Dict, List, Optional, Sequence
 
+from loguru import logger
+
 from .models import KnowledgeChunk, VectorMatch
+
+
+REBUILD_UPSERT_BATCH_SIZE = 256
 
 
 class SentenceTransformerEmbedder:
@@ -44,16 +49,64 @@ class SentenceTransformerEmbedder:
         return values.tolist()
 
     def count_tokens(self, text: str) -> int:
-        return len(self._load().tokenizer.encode(text, add_special_tokens=False))
+        return len(
+            self._load().tokenizer.encode(
+                text,
+                add_special_tokens=False,
+                verbose=False,
+            )
+        )
 
     def split_tokens(self, text: str, *, size: int, overlap: int) -> List[str]:
         tokenizer = self._load().tokenizer
-        tokens = tokenizer.encode(text, add_special_tokens=False)
+        tokens = tokenizer.encode(text, add_special_tokens=False, verbose=False)
         step = max(1, size - overlap)
         return [
             tokenizer.decode(tokens[start : start + size], skip_special_tokens=True)
             for start in range(0, len(tokens), step)
         ]
+
+    def split_prefixed_tokens(
+        self,
+        prefix: str,
+        text: str,
+        *,
+        size: int,
+        overlap: int,
+    ) -> List[str]:
+        """Split text while keeping every rendered chunk inside the total budget."""
+        tokenizer = self._load().tokenizer
+        header = f"{prefix}\nAnswer:"
+        header_tokens = tokenizer.encode(
+            header,
+            add_special_tokens=False,
+            verbose=False,
+        )
+        # Reserve some room for the answer even if source metadata is unusually long.
+        header_tokens = header_tokens[: max(1, size - min(64, size // 2))]
+        answer_tokens = tokenizer.encode(
+            text,
+            add_special_tokens=False,
+            verbose=False,
+        )
+        answer_size = max(1, size - len(header_tokens))
+        answer_overlap = min(overlap, max(0, answer_size - 1))
+        step = max(1, answer_size - answer_overlap)
+        chunks: List[str] = []
+        for start in range(0, len(answer_tokens), step):
+            piece_tokens = answer_tokens[start : start + answer_size]
+            combined = header_tokens + piece_tokens
+            rendered = tokenizer.decode(combined, skip_special_tokens=True).strip()
+            # Tokenizer decode/encode is not guaranteed to be perfectly idempotent.
+            while piece_tokens and self.count_tokens(rendered) > size:
+                piece_tokens = piece_tokens[:-1]
+                rendered = tokenizer.decode(
+                    header_tokens + piece_tokens,
+                    skip_special_tokens=True,
+                ).strip()
+            if rendered:
+                chunks.append(rendered)
+        return chunks
 
     def health(self) -> Dict[str, str]:
         if importlib.util.find_spec("sentence_transformers") is None:
@@ -217,14 +270,75 @@ class QdrantVectorStore:
         )
 
     def _activate_version_sync(self, collection, document_id, version, previous_version) -> None:
-        if previous_version:
-            self._set_status_sync(collection, document_id, previous_version, "retired")
         try:
             self._set_status_sync(collection, document_id, version, "ready")
+            if previous_version:
+                self._set_status_sync(collection, document_id, previous_version, "retired")
         except Exception:
+            self._set_status_sync(collection, document_id, version, "staged")
             if previous_version:
                 self._set_status_sync(collection, document_id, previous_version, "ready")
             raise
+
+    async def start_rebuild(self, vector_size: int) -> str:
+        return await asyncio.to_thread(self._start_rebuild_sync, vector_size)
+
+    def _start_rebuild_sync(self, vector_size: int) -> str:
+        from qdrant_client import models
+
+        collection = f"{self.collection_alias}_{uuid.uuid4().hex[:8]}"
+        self._get_client().create_collection(
+            collection_name=collection,
+            vectors_config=models.VectorParams(size=vector_size, distance=models.Distance.COSINE),
+        )
+        return collection
+
+    async def upsert_rebuild(self, rebuild_id: str, chunks, vectors) -> None:
+        await asyncio.to_thread(self._upsert_sync, rebuild_id, chunks, vectors)
+
+    async def finish_rebuild(self, rebuild_id: str) -> None:
+        await asyncio.to_thread(self._finish_rebuild_sync, rebuild_id)
+
+    def _finish_rebuild_sync(self, rebuild_id: str) -> None:
+        from qdrant_client import models
+
+        client = self._get_client()
+        old_collection = None
+        for alias in client.get_aliases().aliases:
+            if alias.alias_name == self.collection_alias:
+                old_collection = alias.collection_name
+                break
+        operations = []
+        if old_collection:
+            operations.append(
+                models.DeleteAliasOperation(
+                    delete_alias=models.DeleteAlias(alias_name=self.collection_alias)
+                )
+            )
+        operations.append(
+            models.CreateAliasOperation(
+                create_alias=models.CreateAlias(
+                    collection_name=rebuild_id,
+                    alias_name=self.collection_alias,
+                )
+            )
+        )
+        client.update_collection_aliases(change_aliases_operations=operations)
+        self._collection_name = rebuild_id
+        if old_collection and old_collection != rebuild_id:
+            try:
+                client.delete_collection(old_collection)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "Old Qdrant collection cleanup failed: {}",
+                    type(cleanup_error).__name__,
+                )
+
+    async def abort_rebuild(self, rebuild_id: str) -> None:
+        try:
+            await asyncio.to_thread(self._get_client().delete_collection, rebuild_id)
+        except Exception:
+            pass
 
     def _set_status_sync(self, collection, document_id, version, status) -> None:
         self._get_client().set_payload(
@@ -235,7 +349,21 @@ class QdrantVectorStore:
         )
 
     async def replace_all(self, chunks, vectors) -> None:
-        await asyncio.to_thread(self._replace_all_sync, chunks, vectors)
+        if not chunks:
+            await asyncio.to_thread(self._replace_all_sync, chunks, vectors)
+            return
+        rebuild_id = await self.start_rebuild(len(vectors[0]))
+        try:
+            for start in range(0, len(chunks), REBUILD_UPSERT_BATCH_SIZE):
+                await self.upsert_rebuild(
+                    rebuild_id,
+                    chunks[start : start + REBUILD_UPSERT_BATCH_SIZE],
+                    vectors[start : start + REBUILD_UPSERT_BATCH_SIZE],
+                )
+            await self.finish_rebuild(rebuild_id)
+        except Exception:
+            await self.abort_rebuild(rebuild_id)
+            raise
 
     def _replace_all_sync(self, chunks, vectors) -> None:
         from qdrant_client import models
@@ -258,31 +386,7 @@ class QdrantVectorStore:
                 client.delete_collection(old_collection)
             self._collection_name = None
             return
-        new_collection = f"{self.collection_alias}_{uuid.uuid4().hex[:8]}"
-        client.create_collection(
-            collection_name=new_collection,
-            vectors_config=models.VectorParams(size=len(vectors[0]), distance=models.Distance.COSINE),
-        )
-        self._upsert_sync(new_collection, chunks, vectors)
-        operations = []
-        if old_collection:
-            operations.append(
-                models.DeleteAliasOperation(
-                    delete_alias=models.DeleteAlias(alias_name=self.collection_alias)
-                )
-            )
-        operations.append(
-            models.CreateAliasOperation(
-                create_alias=models.CreateAlias(
-                    collection_name=new_collection,
-                    alias_name=self.collection_alias,
-                )
-            )
-        )
-        client.update_collection_aliases(change_aliases_operations=operations)
-        self._collection_name = new_collection
-        if old_collection and old_collection != new_collection:
-            client.delete_collection(old_collection)
+        # Non-empty replacement is implemented by the streaming rebuild methods.
 
     def _delete_sync(self, collection: str, values: Dict[str, Any]):
         from qdrant_client import models

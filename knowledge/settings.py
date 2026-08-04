@@ -29,6 +29,9 @@ class KnowledgeSettings:
     catalog_path: Path = Path(".data/knowledge/catalog.sqlite3")
     documents_path: Path = Path(".data/knowledge/documents")
     admin_token: str = ""
+    medquad_source_path: Path = Path(".data/sources/medquad")
+    medquad_revision: str = "577bd37b96c02d1833b2c9eed2de9f96964e96cb"
+    medquad_batch_size: int = 128
 
     @classmethod
     def from_env(cls) -> "KnowledgeSettings":
@@ -48,4 +51,11 @@ class KnowledgeSettings:
             catalog_path=Path(os.getenv("RAG_CATALOG_PATH", str(cls.catalog_path))),
             documents_path=Path(os.getenv("RAG_DOCUMENTS_PATH", str(cls.documents_path))),
             admin_token=os.getenv("RAG_ADMIN_TOKEN", ""),
+            medquad_source_path=Path(
+                os.getenv("MEDQUAD_SOURCE_PATH", str(cls.medquad_source_path))
+            ),
+            medquad_revision=os.getenv("MEDQUAD_REVISION", cls.medquad_revision),
+            medquad_batch_size=int(
+                os.getenv("MEDQUAD_BATCH_SIZE", str(cls.medquad_batch_size))
+            ),
         )

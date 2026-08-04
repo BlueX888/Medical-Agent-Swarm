@@ -211,6 +211,25 @@ async def reindex_knowledge(request: Request) -> Dict[str, Any]:
     return result
 
 
+@app.post(
+    "/api/admin/knowledge/imports/medquad",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def import_medquad(request: Request) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    manager = _knowledge_runtime(request).manager
+    try:
+        result = await manager.submit_medquad_import()
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="MedQuAD source data is not available",
+        ) from exc
+    if not result.get("duplicate") and result.get("job_id"):
+        _spawn_workflow_task(request, manager.process_job(result["job_id"]))
+    return result
+
+
 @app.get("/api/admin/knowledge/jobs/{job_id}")
 async def get_knowledge_job(request: Request, job_id: str) -> Dict[str, Any]:
     _require_knowledge_admin(request)

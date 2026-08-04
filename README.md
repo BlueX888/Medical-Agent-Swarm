@@ -309,6 +309,39 @@ MEM0_CONFIG = {
 
 不配置 Mem0 时，核心问答和多 Agent 协作仍可正常运行。
 
+## 本地 RAG 医学知识库
+
+RAG 默认关闭。启用后，系统会在 Orchestrator 完成风险与意图判断后按需检索本地医学资料；高危、急症和纯症状分诊不会等待检索。知识库不可用时会降级到原有 Agent 流程，并且不会生成知识库引用。
+
+启动 Redis 与 Qdrant：
+
+```bash
+docker compose up -d redis qdrant
+```
+
+在 `.env` 中至少配置：
+
+```env
+RAG_ENABLED=true
+QDRANT_URL=http://127.0.0.1:6333
+RAG_ADMIN_TOKEN=replace-with-a-long-random-token
+```
+
+首次入库或检索会在本机加载配置的 Embedding 与重排模型。管理员通过 `X-Knowledge-Admin-Token` 调用以下异步管理接口：
+
+```text
+POST   /api/admin/knowledge/documents
+PUT    /api/admin/knowledge/documents/{document_id}
+GET    /api/admin/knowledge/documents
+DELETE /api/admin/knowledge/documents/{document_id}
+POST   /api/admin/knowledge/reindex
+GET    /api/admin/knowledge/jobs/{job_id}
+```
+
+上传使用 multipart，`file` 为 PDF、Markdown、HTML 或 UTF-8 TXT，`metadata` 为 JSON 字符串，例如 `{"title":"指南标题","source_org":"发布机构","version":"2026"}`。扫描型 PDF/OCR、DOCX、图片和自动网页抓取不在第一版范围内。
+
+RAG 接入将 LangGraph 状态版本提升为 `medical-swarm-v2-rag`；升级前尚未完成的 v1 checkpoint 不会被新图恢复，应在部署升级前结束或清理旧的进行中任务。
+
 ## 项目结构
 
 ```text

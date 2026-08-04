@@ -97,6 +97,14 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function asSources(value: unknown): AssistantPayload["sources"] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is NonNullable<AssistantPayload["sources"]>[number] =>
+      Boolean(item) && typeof item === "object" && typeof (item as { title?: unknown }).title === "string"
+  );
+}
+
 function toServiceStatus(health: ApiHealth): ServiceStatus {
   return health.status === "ok" && health.memory.status === "ok" ? "healthy" : "degraded";
 }
@@ -115,6 +123,7 @@ function buildPayloadFromMetadata(metadata: Record<string, unknown> | undefined)
     participants: asStringArray(metadata.agents_involved)
       .map((id) => AGENT_LABELS[id])
       .filter((label): label is string => Boolean(label)),
+    sources: asSources(metadata.sources),
     safetyChecked: metadata.safety_checked === true,
     failed: false
   };
@@ -131,6 +140,7 @@ function buildAssistantMessage(snapshot: ConsultationSnapshot): ChatMessage {
         suggestions: snapshot.result.suggestions,
         disclaimer: snapshot.result.disclaimer,
         participants: snapshot.result.participants,
+        sources: snapshot.result.sources,
         safetyChecked: snapshot.progress.safety_checked,
         failed: false
       }

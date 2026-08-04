@@ -737,6 +737,14 @@ select:focus-visible { outline: 3px solid rgba(49, 92, 155, 0.32); outline-offse
   to { opacity: 1; }
 }
 
+.source-block { margin-top: 18px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: color-mix(in srgb, var(--porcelain) 78%, white); }
+.source-block h3 { margin: 0 0 10px; font-size: 14px; }
+.source-block ol { display: grid; gap: 9px; margin: 0; padding-left: 20px; }
+.source-block li { font-size: 13px; line-height: 1.45; }
+.source-block a { color: var(--teal-dark); font-weight: 650; }
+.source-block small { display: block; color: var(--muted); }
+.source-id { color: var(--muted); font-variant-numeric: tabular-nums; }
+
 @media (max-width: 900px) {
   .app-shell { padding-inline: 16px; }
   .workspace { grid-template-columns: minmax(0, 1fr) 286px; gap: 12px; }

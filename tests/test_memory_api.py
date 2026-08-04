@@ -393,8 +393,9 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
             "risk_level": "high",
             "suggestions": ["今天联系医生"],
             "disclaimer": "以上信息不能替代医生诊断。",
-            "participants": ["风险与症状分析"],
-        },
+                "participants": ["风险与症状分析"],
+                "sources": [],
+            },
         "failure": None,
     }
     assert wrong_session.status_code == 404

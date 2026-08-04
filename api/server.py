@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import secrets
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.skill_loader import discover_skills, is_active_skill
@@ -28,6 +29,7 @@ from memory import (
     ShortTermMemoryError,
     create_short_term_memory,
 )
+from knowledge import DocumentValidationError, KnowledgeRuntime, create_knowledge_runtime
 from swarm import SwarmCoordinator
 
 from .schemas import (
@@ -35,6 +37,7 @@ from .schemas import (
     ConsultationCreateRequest,
     ConsultationCreateResponse,
     ConsultationSnapshot,
+    CitationSource,
     DebugEventsResponse,
     DebugRunResponse,
     EffectReconcileRequest,
@@ -69,6 +72,8 @@ PUBLIC_AGENT_ROLES = {
 async def lifespan(application: FastAPI):
     application.state.short_term_memory = await create_short_term_memory()
     application.state.workflow_tasks = set()
+    application.state.knowledge_runtime = create_knowledge_runtime()
+    await application.state.knowledge_runtime.manager.initialize()
     try:
         settings = CheckpointSettings.from_env()
         async with open_checkpointer(settings) as checkpointer:
@@ -78,6 +83,11 @@ async def lifespan(application: FastAPI):
                     application.state.checkpointer = checkpointer
                     application.state.run_lease = run_lease
                     application.state.audit_store = audit_store
+                    for job in await application.state.knowledge_runtime.manager.recover_jobs():
+                        _spawn_workflow_task(
+                            application,
+                            application.state.knowledge_runtime.manager.process_job(job["id"]),
+                        )
                     try:
                         yield
                     finally:
@@ -111,10 +121,103 @@ app.add_middleware(
 @app.get("/api/health")
 async def health(request: Request) -> Dict[str, Any]:
     memory_health = await _short_term_memory(request).health()
+    knowledge_health = await _knowledge_runtime(request).knowledge_base.health()
+    knowledge_health.update(await _knowledge_runtime(request).manager.health())
     return {
-        "status": "ok" if memory_health["status"] == "ok" else "degraded",
+        "status": (
+            "ok"
+            if memory_health["status"] == "ok"
+            and knowledge_health.get("status") in {"ok", "disabled"}
+            else "degraded"
+        ),
         "memory": memory_health,
+        "knowledge": knowledge_health,
     }
+
+
+@app.post("/api/admin/knowledge/documents", status_code=status.HTTP_202_ACCEPTED)
+async def upload_knowledge_document(
+    request: Request,
+    file: UploadFile = File(...),
+    metadata: str = Form("{}"),
+) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    metadata_value = _parse_knowledge_metadata(metadata)
+    content = await file.read(_knowledge_runtime(request).settings.max_file_bytes + 1)
+    try:
+        result = await _knowledge_runtime(request).manager.submit_document(
+            filename=file.filename or "",
+            content=content,
+            metadata=metadata_value,
+        )
+    except DocumentValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not result.get("duplicate"):
+        _spawn_workflow_task(
+            request,
+            _knowledge_runtime(request).manager.process_job(result["job_id"]),
+        )
+    return result
+
+
+@app.put("/api/admin/knowledge/documents/{document_id}", status_code=status.HTTP_202_ACCEPTED)
+async def replace_knowledge_document(
+    request: Request,
+    document_id: str,
+    file: UploadFile = File(...),
+    metadata: str = Form("{}"),
+) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    metadata_value = _parse_knowledge_metadata(metadata)
+    content = await file.read(_knowledge_runtime(request).settings.max_file_bytes + 1)
+    try:
+        result = await _knowledge_runtime(request).manager.submit_document(
+            filename=file.filename or "",
+            content=content,
+            metadata=metadata_value,
+            document_id=document_id,
+        )
+    except DocumentValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not result.get("duplicate"):
+        _spawn_workflow_task(request, _knowledge_runtime(request).manager.process_job(result["job_id"]))
+    return result
+
+
+@app.get("/api/admin/knowledge/documents")
+async def list_knowledge_documents(request: Request) -> List[Dict[str, Any]]:
+    _require_knowledge_admin(request)
+    return await _knowledge_runtime(request).manager.list_documents()
+
+
+@app.delete("/api/admin/knowledge/documents/{document_id}", status_code=status.HTTP_202_ACCEPTED)
+async def delete_knowledge_document(request: Request, document_id: str) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    manager = _knowledge_runtime(request).manager
+    try:
+        result = await manager.submit_delete(document_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="Knowledge document not found") from exc
+    _spawn_workflow_task(request, manager.process_job(result["job_id"]))
+    return result
+
+
+@app.post("/api/admin/knowledge/reindex", status_code=status.HTTP_202_ACCEPTED)
+async def reindex_knowledge(request: Request) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    manager = _knowledge_runtime(request).manager
+    result = await manager.reindex_all()
+    _spawn_workflow_task(request, manager.process_job(result["job_id"]))
+    return result
+
+
+@app.get("/api/admin/knowledge/jobs/{job_id}")
+async def get_knowledge_job(request: Request, job_id: str) -> Dict[str, Any]:
+    _require_knowledge_admin(request)
+    job = await _knowledge_runtime(request).manager.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Knowledge job not found")
+    return job
 
 
 def _start_workflow(
@@ -133,6 +236,7 @@ def _start_workflow(
             "enable_memory": payload.enable_memory,
             "enable_short_term_memory": payload.enable_short_term_memory,
             "enable_long_term_memory": payload.enable_long_term_memory,
+            "enable_rag": payload.enable_rag,
             "context_keys": sorted(payload.context.keys()),
         },
     )
@@ -146,6 +250,7 @@ def _start_workflow(
             _checkpointer(request),
             _run_lease(request),
             _audit_store(request),
+            _knowledge_runtime(request),
         ),
     )
     return collector
@@ -450,6 +555,7 @@ async def _execute_run(
     checkpointer: Any,
     run_lease: Any,
     audit_store: Any,
+    knowledge_runtime: KnowledgeRuntime,
 ) -> None:
     try:
         coordinator = SwarmCoordinator(
@@ -461,6 +567,12 @@ async def _execute_run(
             checkpointer=checkpointer,
             run_lease=run_lease,
             audit_store=audit_store,
+            enable_rag=(
+                knowledge_runtime.settings.enabled
+                if payload.enable_rag is None
+                else payload.enable_rag
+            ),
+            knowledge_base=knowledge_runtime.knowledge_base,
         )
         await coordinator.process(
             question=payload.question,
@@ -588,6 +700,11 @@ def _build_public_consultation_snapshot(
             "suggestions": _string_list(result_data.get("suggestions")),
             "disclaimer": str(result_data.get("disclaimer") or ""),
             "participants": [PUBLIC_AGENT_ROLES[agent_id][1] for agent_id in visible_agent_ids],
+            "sources": [
+                _public_knowledge_source(source)
+                for source in (result_data.get("sources") or [])
+                if isinstance(source, dict)
+            ],
         }
     elif raw_status in {"failed", "timeout"}:
         timed_out = raw_status == "timeout"
@@ -732,6 +849,10 @@ def _string_list(value: Any) -> List[str]:
     return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
 
 
+def _public_knowledge_source(value: Dict[str, Any]) -> Dict[str, str]:
+    return CitationSource.model_validate(value).model_dump()
+
+
 def _short_term_memory(request: Request) -> ShortTermMemory:
     return request.app.state.short_term_memory
 
@@ -746,6 +867,27 @@ def _run_lease(request: Request) -> Any:
 
 def _audit_store(request: Request) -> Any:
     return request.app.state.audit_store
+
+
+def _knowledge_runtime(request: Request) -> KnowledgeRuntime:
+    return request.app.state.knowledge_runtime
+
+
+def _require_knowledge_admin(request: Request) -> None:
+    expected = _knowledge_runtime(request).settings.admin_token
+    supplied = request.headers.get("X-Knowledge-Admin-Token", "")
+    if not expected or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail="Knowledge administrator required")
+
+
+def _parse_knowledge_metadata(value: str) -> Dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="metadata must be a JSON object") from exc
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=422, detail="metadata must be a JSON object")
+    return parsed
 
 
 def _checkpoint_coordinator(
@@ -763,6 +905,8 @@ def _checkpoint_coordinator(
             values.get("enable_short_term_memory", True)
         ),
         enable_long_term_memory=bool(values.get("enable_long_term_memory", True)),
+        enable_rag=bool(values.get("enable_rag", False)),
+        knowledge_base=_knowledge_runtime(request).knowledge_base,
         swarm_timeout_s=float(values.get("swarm_timeout_s") or 120.0),
     )
 
@@ -779,9 +923,10 @@ def _require_checkpoint_admin(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Checkpoint administrator required")
 
 
-def _spawn_workflow_task(request: Request, coroutine: Any) -> asyncio.Task[Any]:
+def _spawn_workflow_task(request: Any, coroutine: Any) -> asyncio.Task[Any]:
     task = asyncio.create_task(coroutine)
-    tasks = request.app.state.workflow_tasks
+    application = request if isinstance(request, FastAPI) else request.app
+    tasks = application.state.workflow_tasks
     tasks.add(task)
     task.add_done_callback(tasks.discard)
     return task

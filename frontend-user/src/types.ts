@@ -56,6 +56,17 @@ export interface ConsultationResult {
   suggestions: string[];
   disclaimer: string;
   participants: string[];
+  sources: CitationSource[];
+}
+
+export interface CitationSource {
+  citation_id: string;
+  title: string;
+  source_org: string;
+  version: string;
+  published_at: string;
+  section: string;
+  external_url: string;
 }
 
 export interface ConsultationFailure {
@@ -77,6 +88,7 @@ export interface AssistantPayload {
   suggestions: string[];
   disclaimer: string;
   participants: string[];
+  sources?: CitationSource[];
   safetyChecked: boolean;
   failed: boolean;
   timedOut?: boolean;

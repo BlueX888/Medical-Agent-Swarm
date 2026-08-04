@@ -12,6 +12,7 @@ class RunCreateRequest(BaseModel):
     enable_memory: bool = True
     enable_short_term_memory: Optional[bool] = None
     enable_long_term_memory: Optional[bool] = None
+    enable_rag: Optional[bool] = None
 
 
 class RunCreateResponse(BaseModel):
@@ -50,12 +51,23 @@ class ConsultationProgress(BaseModel):
     safety_checked: bool = False
 
 
+class CitationSource(BaseModel):
+    citation_id: str = ""
+    title: str = ""
+    source_org: str = ""
+    version: str = ""
+    published_at: str = ""
+    section: str = ""
+    external_url: str = ""
+
+
 class ConsultationResult(BaseModel):
     answer: str
     risk_level: Optional[Literal["low", "medium", "high", "emergency"]] = None
     suggestions: List[str] = Field(default_factory=list)
     disclaimer: str = ""
     participants: List[str] = Field(default_factory=list)
+    sources: List[CitationSource] = Field(default_factory=list)
 
 
 class ConsultationFailure(BaseModel):

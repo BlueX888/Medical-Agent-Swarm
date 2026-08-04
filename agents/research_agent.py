@@ -8,8 +8,6 @@ ResearchAgent：医学文献检索和证据支持 Agent
 - 提供文献来源和证据等级
 """
 from typing import Dict, Any, Optional
-from loguru import logger
-
 from .base_agent import BaseAgent
 from .skill_registry_mixin import SkillRegistryMixin
 from core import LLMClient
@@ -84,11 +82,12 @@ class ResearchAgent(BaseAgent, SkillRegistryMixin):
 
 **自动注入信息**：
 - 当前会话历史 recent_history 和相似历史案例 historical_cases 会由系统自动注入上下文/背景信息，无需手动调用 Skill
+- 本地 RAG 命中时会注入 knowledge_bundle / knowledge_context；优先使用其中的医学资料并保留 [K1] 引用编号
 - 最终安全审查由 AgentLoop / SafetyGuard 自动执行，safety_check 不再是可手动调用的 Skill
 
 **Skills 使用策略**：
 - 涉及具体患者症状时先使用 `collect_clinical_context`
-- 只有用户明确要求最新信息、复杂证据、文献或指南依据时才使用 `deep_research`
+- 先使用本地 knowledge_context；只有用户明确要求最新信息，或本地证据为空/不足时才使用 `deep_research`
 - 最终回答前确保措辞谨慎；系统会在输出前强制执行 SafetyGuard
 - 通常最多 2-4 次 Skill 调用；不要尝试调用 safety_check，系统最终会强制兜底
 - 综合多个信息来源，提供证据等级

@@ -108,6 +108,31 @@ export function ChatMessageView({ message, onRetry }: Props) {
 
         <div className="bubble-body"><ReactMarkdown>{visibleContent}</ReactMarkdown></div>
 
+        {payload?.sources && payload.sources.length > 0 && (
+          <section className="source-block" aria-labelledby={`sources-${message.id}`}>
+            <h3 id={`sources-${message.id}`}>参考资料</h3>
+            <ol>
+              {payload.sources.map((source) => (
+                <li key={`${source.citation_id}-${source.title}`}>
+                  <span className="source-id">[{source.citation_id}]</span>{" "}
+                  {source.external_url ? (
+                    <a href={source.external_url} target="_blank" rel="noreferrer noopener">
+                      {source.title}
+                    </a>
+                  ) : (
+                    <strong>{source.title}</strong>
+                  )}
+                  <small>
+                    {[source.source_org, source.version, source.published_at, source.section]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </small>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
         {payload && payload.suggestions.length > 0 && (
           <section className="follow-up-block" aria-labelledby={`advice-${message.id}`}>
             <h3 id={`advice-${message.id}`}>现在可以做什么</h3>

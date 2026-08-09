@@ -84,6 +84,32 @@ async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns(
 
 
 @pytest.mark.asyncio
+async def test_default_history_keeps_only_the_ten_most_recent_turns(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    for index in range(11):
+        await memory.save_turn(
+            "ten-turn-session",
+            f"问题 {index}",
+            f"回答 {index}",
+        )
+
+    assert [
+        message["content"]
+        for message in await memory.load_context(
+            "ten-turn-session",
+            max_turns=11,
+        )
+    ] == [
+        content
+        for index in range(1, 11)
+        for content in (f"问题 {index}", f"回答 {index}")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_session_can_be_cleared_and_expires_after_inactivity(
     short_term_memory_factory,
 ):

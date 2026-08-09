@@ -23,7 +23,7 @@ from loguru import logger
 load_dotenv()
 
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
-DEFAULT_MAX_MESSAGES = 40
+DEFAULT_MAX_MESSAGES = 20
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 KEY_PREFIX = "medical-agent-swarm:stm"
 REDIS_CONNECTION_OPTIONS = {

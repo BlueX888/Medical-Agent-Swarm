@@ -12,7 +12,7 @@ Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的�
 - 医疗 Skill：通过可发现的 Skill 扩展医疗问答流程
 - 风险识别：识别潜在高风险症状并给出就医紧迫性提示
 - 证据研究：支持网络搜索与多来源信息综合
-- 会话上下文：支持内存或 Redis 保存同一会话最近 20 轮对话
+- 会话上下文：支持内存或 Redis 保存同一会话最近 10 轮对话
 - 输出安全检查：检查危险建议、过度诊断和用药风险
 - 多种使用方式：支持命令行、Python 调用和本地调试界面
 
@@ -193,7 +193,7 @@ asyncio.run(main())
 
 ## Redis 短期记忆
 
-短期记忆保存用户问题、最终回答，以及用于恢复最终界面的风险级别、重点建议、免责声明和参与角色数量；不保存 Agent 中间过程或工具结果。默认保留最近 20 轮，并在 24 小时无活动后过期。
+短期记忆保存用户问题、最终回答，以及用于恢复最终界面的风险级别、重点建议、免责声明和参与角色数量；不保存 Agent 中间过程或工具结果。默认保留最近 10 轮，并在 24 小时无活动后过期。
 
 先启动 Redis：
 
@@ -206,7 +206,7 @@ docker compose up -d redis
 ```env
 REDIS_URL=redis://localhost:6379/0
 SHORT_TERM_MEMORY_TTL=86400
-SHORT_TERM_MEMORY_MAX_MESSAGES=40
+SHORT_TERM_MEMORY_MAX_MESSAGES=20
 ```
 
 启动时 Redis 不可用会直接失败，不会回退到进程内存。查看 Redis 健康状态：

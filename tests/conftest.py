@@ -69,7 +69,7 @@ class FakeRedisShortTermMemoryAdapter:
 
 @pytest.fixture
 def short_term_memory_factory():
-    def create(*, ttl_seconds=24 * 60 * 60, max_messages=40):
+    def create(*, ttl_seconds=24 * 60 * 60, max_messages=20):
         adapter = FakeRedisShortTermMemoryAdapter(
             ttl_seconds=ttl_seconds,
             max_messages=max_messages,

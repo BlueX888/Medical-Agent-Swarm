@@ -74,8 +74,6 @@ def catalog():
 @pytest.mark.asyncio
 async def test_routing_regression_case_is_stable_and_valid(item, catalog):
     orchestrator = Orchestrator(DatasetLLM(item), catalog)
-    # Keep this dataset focused on model routing, not evidence-cache shortcuts.
-    orchestrator.evidence_memory.lookup = lambda *args, **kwargs: None
 
     plan = await orchestrator.plan(
         item["question"],
@@ -94,4 +92,3 @@ async def test_routing_regression_case_is_stable_and_valid(item, catalog):
     # A single requested Worker must not turn into an unnecessary swarm.
     if len(item["expected_agents"]) == 1:
         assert len(plan.tasks) == 1
-

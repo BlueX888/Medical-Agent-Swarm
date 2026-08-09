@@ -15,6 +15,7 @@ _STRUCTURED_METADATA_KEYS = {
     "risk_level",
     "key_findings",
 }
+_LEGACY_KNOWLEDGE_CITATION = re.compile(r"(?<!\w)\[K\d+\](?!\w)", re.IGNORECASE)
 
 
 def strip_trailing_structured_metadata(answer: str) -> str:
@@ -32,3 +33,18 @@ def strip_trailing_structured_metadata(answer: str) -> str:
     if not keys.issubset(_STRUCTURED_METADATA_KEYS):
         return answer
     return answer[: match.start()].rstrip()
+
+
+def strip_legacy_knowledge_citations(answer: str) -> str:
+    """Remove citation markers whose local knowledge source no longer exists."""
+    cleaned = _LEGACY_KNOWLEDGE_CITATION.sub("", answer)
+    cleaned = re.sub(r"[ \t]+([，。！？；：,.!?;:])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def sanitize_user_visible_answer(answer: str) -> str:
+    """Apply all compatibility sanitizers at the user-visible boundary."""
+    return strip_legacy_knowledge_citations(
+        strip_trailing_structured_metadata(answer)
+    )

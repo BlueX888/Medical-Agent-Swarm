@@ -21,6 +21,7 @@ from core.checkpointing import (
     open_checkpointer,
     open_run_lease,
 )
+from core.response_content import sanitize_user_visible_answer
 from debug import DebugTraceCollector, InMemoryTraceStore
 from memory import (
     LongTermMemory,
@@ -400,6 +401,27 @@ async def get_agents(enable_swarm: bool = True) -> List[AgentInfo]:
     return agents
 
 
+def _sanitize_public_memory_history(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        if item.get("role") == "assistant":
+            item["content"] = sanitize_user_visible_answer(
+                str(item.get("content") or "")
+            )
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                item["metadata"] = {
+                    key: value
+                    for key, value in metadata.items()
+                    if key != "sources"
+                }
+        sanitized.append(item)
+    return sanitized
+
+
 @app.get("/api/sessions/{session_id}/memory", response_model=MemoryResponse)
 async def get_session_memory(
     request: Request,
@@ -419,7 +441,7 @@ async def get_session_memory(
             status_code=503,
             detail="Short-term memory backend unavailable",
         ) from exc
-    recent_history = recent_history[-limit:]
+    recent_history = _sanitize_public_memory_history(recent_history[-limit:])
     historical_cases = (
         LONG_TERM_MEMORY.search_similar_sessions(query=query, limit=min(limit, 10))
         if query
@@ -594,7 +616,9 @@ def _build_public_consultation_snapshot(
         ]
         visible_agent_ids = result_agent_ids or agent_ids
         result = {
-            "answer": str(run.get("final_answer") or result_data.get("answer") or ""),
+            "answer": sanitize_user_visible_answer(
+                str(run.get("final_answer") or result_data.get("answer") or "")
+            ),
             "risk_level": risk_level,
             "suggestions": _string_list(result_data.get("suggestions")),
             "disclaimer": str(result_data.get("disclaimer") or ""),

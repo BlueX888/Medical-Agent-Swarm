@@ -91,7 +91,11 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
         await coordinator.short_term_memory.save_turn(
             session_id,
             question,
-            "回答",
+            "回答 [K1]",
+            assistant_metadata={
+                "sources": [{"citation_id": "K1", "title": "旧知识库资料"}],
+                "risk_level": "low",
+            },
         )
         return {"answer": "回答", "session_id": session_id}
 
@@ -141,6 +145,7 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
             "问题",
             "回答",
         ]
+        assert payload["recent_history"][1]["metadata"] == {"risk_level": "low"}
 
         deleted = client.delete("/api/sessions/session-api/memory")
         assert deleted.status_code == 200
@@ -345,13 +350,13 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
     )
     collector.finish_success(
         result_json={
-            "answer": "请尽快安排线下评估。",
+            "answer": "请尽快安排线下评估 [K1]。",
             "risk_level": "high",
             "suggestions": ["今天联系医生"],
             "disclaimer": "以上信息不能替代医生诊断。",
             "agents_involved": ["diagnostic_agent"],
         },
-        final_answer="请尽快安排线下评估。",
+        final_answer="请尽快安排线下评估 [K1]。",
     )
     server.RUN_STORE.add(collector)
 

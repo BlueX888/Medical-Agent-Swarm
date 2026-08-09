@@ -89,8 +89,6 @@ async def test_graph_uses_route_plan_and_keeps_public_result_shape():
         session_manager=None,
         enable_long_term_memory=False,
     )
-    graph.orchestrator.evidence_memory.lookup = lambda *args, **kwargs: None
-
     state = await graph.ainvoke(
         {
             "question": "如何改善睡眠？",

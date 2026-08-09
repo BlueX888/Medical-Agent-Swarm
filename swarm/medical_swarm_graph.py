@@ -25,7 +25,7 @@ from core.checkpointing import (
     checkpoint_config,
 )
 from core.observability import trace_async
-from core.response_content import strip_trailing_structured_metadata
+from core.response_content import sanitize_user_visible_answer
 from debug import DebugTraceCollector
 from memory import (
     LongTermMemory,
@@ -942,7 +942,7 @@ class MedicalSwarmGraph:
         """Build the API-compatible final result."""
         mode = state.get("mode") or state.get("route") or "safe_fallback"
         result = dict(state.get("result") or {})
-        final_answer = strip_trailing_structured_metadata(
+        final_answer = sanitize_user_visible_answer(
             state.get("final_answer") or result.get("answer", "")
         )
         result["answer"] = final_answer

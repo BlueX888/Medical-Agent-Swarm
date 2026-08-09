@@ -22,7 +22,7 @@ class RecordingShortTermMemory:
 
     async def load_context(self, session_id, max_turns=5):
         assert session_id == "session-a"
-        assert max_turns == 5
+        assert max_turns == 10
         return [
             {
                 "role": "user",

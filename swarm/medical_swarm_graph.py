@@ -35,6 +35,7 @@ from memory import (
     ShortTermMemory,
     ShortTermMemoryError,
 )
+from memory.short_term import MAX_RETAINED_TURNS
 from .medical_swarm_state import MedicalSwarmState
 from .agent_catalog import AgentCatalog
 from .orchestrator import Orchestrator
@@ -384,7 +385,7 @@ class MedicalSwarmGraph:
             try:
                 recent_history = await self.short_term_memory.load_context(
                     session_id=session_id,
-                    max_turns=5,
+                    max_turns=MAX_RETAINED_TURNS,
                 )
             except ShortTermMemoryError as exc:
                 short_term_memory_error = str(exc)

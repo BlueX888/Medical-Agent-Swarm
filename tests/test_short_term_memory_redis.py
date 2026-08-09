@@ -21,12 +21,12 @@ async def test_redis_backend_persists_trims_refreshes_and_clears():
     memory = ShortTermMemory(
         redis_url=REDIS_TEST_URL,
         ttl_seconds=60,
-        max_messages=4,
+        max_messages=40,
     )
     second_process_memory = ShortTermMemory(
         redis_url=REDIS_TEST_URL,
         ttl_seconds=60,
-        max_messages=4,
+        max_messages=40,
     )
 
     try:
@@ -39,7 +39,7 @@ async def test_redis_backend_persists_trims_refreshes_and_clears():
         await asyncio.sleep(2)
         aged_ttl = await memory.get_session_ttl(session_id)
 
-        for index in range(1, 3):
+        for index in range(1, 11):
             await memory.save_turn(session_id, f"问题 {index}", f"回答 {index}")
 
         refreshed_ttl = await memory.get_session_ttl(session_id)
@@ -50,7 +50,11 @@ async def test_redis_backend_persists_trims_refreshes_and_clears():
                 session_id,
                 max_turns=10,
             )
-        ] == ["问题 1", "回答 1", "问题 2", "回答 2"]
+        ] == [
+            content
+            for index in range(1, 11)
+            for content in (f"问题 {index}", f"回答 {index}")
+        ]
         assert 0 < await memory.get_session_ttl(session_id) <= 60
         assert await memory.clear_session(session_id) is True
         assert await memory.load_context(session_id) == []

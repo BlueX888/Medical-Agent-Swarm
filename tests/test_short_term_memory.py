@@ -3,7 +3,12 @@ from unittest.mock import ANY
 
 import pytest
 
-from memory import ShortTermMemory, ShortTermMemoryUnavailable, create_short_term_memory
+from memory import (
+    RedisShortTermMemoryAdapter,
+    ShortTermMemory,
+    ShortTermMemoryUnavailable,
+    create_short_term_memory,
+)
 
 
 @pytest.mark.asyncio
@@ -211,3 +216,26 @@ def test_memory_named_adapter_is_rejected():
 
     with pytest.raises(ValueError, match="must use the Redis backend"):
         ShortTermMemory(adapter=MemoryNamedAdapter())
+
+
+def test_history_configuration_cannot_exceed_ten_turns(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory(max_messages=40)
+
+    assert memory.max_messages == 20
+
+
+def test_redis_adapter_cannot_be_configured_above_ten_turns(monkeypatch):
+    monkeypatch.setattr(
+        RedisShortTermMemoryAdapter,
+        "_create_client",
+        lambda *args, **kwargs: object(),
+    )
+
+    adapter = RedisShortTermMemoryAdapter(
+        ttl_seconds=60,
+        max_messages=40,
+    )
+
+    assert adapter.max_messages == 20

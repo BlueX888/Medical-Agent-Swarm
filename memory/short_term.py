@@ -23,7 +23,9 @@ from loguru import logger
 load_dotenv()
 
 DEFAULT_TTL_SECONDS = 24 * 60 * 60
-DEFAULT_MAX_MESSAGES = 20
+MAX_RETAINED_TURNS = 10
+MESSAGES_PER_TURN = 2
+MAX_RETAINED_MESSAGES = MAX_RETAINED_TURNS * MESSAGES_PER_TURN
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 KEY_PREFIX = "medical-agent-swarm:stm"
 REDIS_CONNECTION_OPTIONS = {
@@ -47,6 +49,14 @@ redis.call('LTRIM', KEYS[1], -max_messages, -1)
 redis.call('EXPIRE', KEYS[1], ttl_seconds)
 return 1
 """
+
+
+def _complete_turn_message_limit(max_messages: int) -> int:
+    requested_messages = int(max_messages)
+    if requested_messages < MESSAGES_PER_TURN:
+        raise ValueError("max_messages must be at least two")
+    bounded_messages = min(requested_messages, MAX_RETAINED_MESSAGES)
+    return bounded_messages - (bounded_messages % MESSAGES_PER_TURN)
 
 
 class ShortTermMemoryError(RuntimeError):
@@ -151,7 +161,7 @@ class RedisShortTermMemoryAdapter:
         redis_config: Optional[Dict[str, Any]] = None,
     ):
         self.ttl_seconds = ttl_seconds
-        self.max_messages = max_messages
+        self.max_messages = _complete_turn_message_limit(max_messages)
         self._redis = self._create_client(
             redis_url=redis_url,
             redis_config=redis_config or {},
@@ -319,17 +329,16 @@ class ShortTermMemory:
         *,
         redis_url: Optional[str] = None,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
-        max_messages: int = DEFAULT_MAX_MESSAGES,
+        max_messages: int = MAX_RETAINED_MESSAGES,
         adapter: Optional[ShortTermMemoryAdapter] = None,
     ):
         if ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be greater than zero")
-        if max_messages < 2:
-            raise ValueError("max_messages must be at least two")
 
-        # Complete turns always contain two messages.
+        # Complete turns always contain two messages. Deployments may retain
+        # fewer turns, but the Redis history must never exceed the safety cap.
         self.ttl_seconds = int(ttl_seconds)
-        self.max_messages = int(max_messages) - (int(max_messages) % 2)
+        self.max_messages = _complete_turn_message_limit(max_messages)
         self._adapter = adapter or RedisShortTermMemoryAdapter(
             ttl_seconds=self.ttl_seconds,
             max_messages=self.max_messages,
@@ -448,7 +457,7 @@ async def create_short_term_memory() -> ShortTermMemory:
     )
     max_messages = _positive_int_env(
         "SHORT_TERM_MEMORY_MAX_MESSAGES",
-        DEFAULT_MAX_MESSAGES,
+        MAX_RETAINED_MESSAGES,
     )
 
     redis_failure: Optional[Exception] = None

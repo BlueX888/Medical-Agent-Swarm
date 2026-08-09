@@ -326,22 +326,109 @@ button { -webkit-tap-highlight-color: transparent; }
 .guide-item strong { color: var(--ink); font-size: 12px; font-weight: 700; }
 .guide-item small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
-.example-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.example-section { margin-top: 2px; }
 
-.suggestion-chip {
-  min-height: 44px;
-  padding: 7px 12px;
+.example-heading {
+  margin: 0 0 9px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.example-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.suggestion-card {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 176px;
+  flex-direction: column;
+  gap: 11px;
+  padding: 14px;
+  overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: 11px;
-  background: var(--porcelain);
+  border-radius: 14px;
+  background: var(--surface);
   color: var(--ink);
   cursor: pointer;
   text-align: left;
-  font-size: 12px;
-  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+  box-shadow: 0 8px 20px rgba(24, 48, 45, 0.035);
+  transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
 }
 
-.suggestion-chip:hover { border-color: var(--teal); background: var(--teal-mist); color: var(--teal-dark); }
+.suggestion-card::after {
+  position: absolute;
+  right: 14px;
+  bottom: 0;
+  left: 14px;
+  height: 3px;
+  border-radius: 3px 3px 0 0;
+  background: currentColor;
+  content: "";
+  opacity: 0.24;
+  transform: scaleX(0.36);
+  transform-origin: left;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+.suggestion-card-single { color: var(--teal-dark); }
+.suggestion-card-parallel { color: var(--blue); }
+.suggestion-card-sequential { color: var(--amber); }
+
+.suggestion-card:hover,
+.suggestion-card.is-selected {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 26px rgba(24, 48, 45, 0.08);
+}
+
+.suggestion-card-single:hover,
+.suggestion-card-single.is-selected { border-color: #86b9b1; background: #f7fbfa; }
+.suggestion-card-parallel:hover,
+.suggestion-card-parallel.is-selected { border-color: #9bb2d2; background: #f8faff; }
+.suggestion-card-sequential:hover,
+.suggestion-card-sequential.is-selected { border-color: #d5bd7b; background: #fffdf7; }
+
+.suggestion-card:hover::after,
+.suggestion-card.is-selected::after { opacity: 0.72; transform: scaleX(1); }
+
+.suggestion-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.suggestion-card-header strong {
+  color: currentColor;
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.route-glyph {
+  color: currentColor;
+  font-family: var(--utility);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: pre;
+}
+
+.suggestion-question {
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.58;
+}
+
+.suggestion-description {
+  margin-top: auto;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
 
 .msg-row { display: flex; flex-direction: column; animation: rise-in 220ms ease-out; }
 .msg-row-user { align-items: flex-end; }
@@ -868,6 +955,8 @@ select:focus-visible { outline: 3px solid rgba(49, 92, 155, 0.32); outline-offse
   .workspace { grid-template-columns: minmax(0, 1fr) 286px; gap: 12px; }
   .consultation-rail { padding: 16px; }
   .chat-area { padding-inline: 24px; }
+  .example-list { grid-template-columns: 1fr; }
+  .suggestion-card { min-height: 0; }
 }
 
 @media (max-width: 767px) {
@@ -896,8 +985,7 @@ select:focus-visible { outline: 3px solid rgba(49, 92, 155, 0.32); outline-offse
   .question-guide { grid-template-columns: 1fr; margin-bottom: 16px; }
   .guide-item { padding: 10px 12px; }
   .guide-item + .guide-item { border-top: 1px solid var(--line); border-left: none; }
-  .example-list { display: grid; }
-  .suggestion-chip { width: 100%; min-height: 44px; }
+  .suggestion-card { width: 100%; padding: 13px; }
   .bubble-user { max-width: 90%; }
   .result-card { padding: 16px; }
   .risk-summary { align-items: flex-start; flex-direction: column; gap: 6px; }

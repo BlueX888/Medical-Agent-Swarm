@@ -48,10 +48,42 @@ const AGENT_LABELS: Record<string, string> = {
   research_agent: "医学证据检索"
 };
 
-const EXAMPLE_QUESTIONS = [
-  "最近两天头痛并伴有恶心，需要马上就医吗？",
-  "发烧 38.5 度还有点咳嗽，在家怎么护理？",
-  "长期熬夜之后心悸，有什么生活上的建议？"
+type ExampleAnalysisMode = "single" | "parallel" | "sequential";
+
+interface ExampleQuestion {
+  id: string;
+  label: string;
+  description: string;
+  question: string;
+  analysisMode: ExampleAnalysisMode;
+  routeGlyph: string;
+}
+
+const EXAMPLE_QUESTIONS: ExampleQuestion[] = [
+  {
+    id: "quick-triage",
+    label: "快速判断",
+    description: "一个重点，快速分析",
+    question: "低烧两天，最高 38.1℃，精神和食欲还可以，需要去医院吗？",
+    analysisMode: "single",
+    routeGlyph: "●"
+  },
+  {
+    id: "parallel-plan",
+    label: "综合计划",
+    description: "两类建议，分别核对",
+    question: "体检发现轻度脂肪肝，目前没有不适。请分别总结相关指南的核心结论，并给我一份一周饮食和运动计划。",
+    analysisMode: "parallel",
+    routeGlyph: "●  ●"
+  },
+  {
+    id: "risk-first",
+    label: "风险优先",
+    description: "先看风险，再继续",
+    question: "近一周头痛、恶心、视物模糊，而且持续加重。请先判断是否需要尽快就医，再根据风险判断检索相关指南，说明下一步应做哪些检查。",
+    analysisMode: "sequential",
+    routeGlyph: "● → ●"
+  }
 ];
 
 const EMPTY_PROFILE: Profile = { age: "", sex: "", medicalHistory: "", medications: "" };
@@ -460,18 +492,42 @@ function App() {
                   <button type="button" className="restore-conversation-button" onClick={restorePreviousConversation}>返回上一对话</button>
                 )}
                 <p className="empty-kicker">先判断风险，再找到下一步</p>
-                <h2>说说最担心的症状</h2>
-                <p className="empty-sub">从最影响你的问题开始。信息越具体，建议越容易落实。</p>
-                <div className="question-guide" aria-label="描述症状时建议包含">
-                  <div className="guide-item"><Activity size={18} /><span><strong>不舒服的部位</strong><small>感觉与严重程度</small></span></div>
-                  <div className="guide-item"><Clock3 size={18} /><span><strong>持续了多久</strong><small>突然、反复或持续</small></span></div>
-                  <div className="guide-item"><HeartPulse size={18} /><span><strong>伴随的情况</strong><small>其他症状与用药</small></span></div>
+                <h2>从最想解决的健康问题开始</h2>
+                <p className="empty-sub">可以描述症状，也可以直接询问就医时机、生活调整或医学依据。</p>
+                <div className="question-guide" aria-label="描述健康问题时建议包含">
+                  <div className="guide-item"><Activity size={18} /><span><strong>发生了什么</strong><small>部位、感觉与严重程度</small></span></div>
+                  <div className="guide-item"><Clock3 size={18} /><span><strong>持续与变化</strong><small>多久、反复或持续加重</small></span></div>
+                  <div className="guide-item"><HeartPulse size={18} /><span><strong>你想了解什么</strong><small>风险、原因或下一步</small></span></div>
                 </div>
-                <div className="example-list" aria-label="示例问题">
-                  {EXAMPLE_QUESTIONS.map((question) => (
-                    <button key={question} type="button" className="suggestion-chip" onClick={() => chooseExample(question)}>{question}</button>
-                  ))}
-                </div>
+                <section className="example-section" aria-labelledby="example-heading">
+                  <p id="example-heading" className="example-heading">选择一种提问方式</p>
+                  <div className="example-list">
+                    {EXAMPLE_QUESTIONS.map((example) => {
+                      const selected = input === example.question;
+                      const labelId = `example-${example.id}-label`;
+                      const questionId = `example-${example.id}-question`;
+                      const descriptionId = `example-${example.id}-description`;
+                      return (
+                        <button
+                          key={example.id}
+                          type="button"
+                          className={`suggestion-card suggestion-card-${example.analysisMode}${selected ? " is-selected" : ""}`}
+                          aria-labelledby={`${labelId} ${questionId}`}
+                          aria-describedby={descriptionId}
+                          aria-pressed={selected}
+                          onClick={() => chooseExample(example.question)}
+                        >
+                          <span className="suggestion-card-header">
+                            <strong id={labelId}>{example.label}</strong>
+                            <span className="route-glyph" aria-hidden="true">{example.routeGlyph}</span>
+                          </span>
+                          <span id={questionId} className="suggestion-question">{example.question}</span>
+                          <span id={descriptionId} className="suggestion-description">{example.description}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
               </div>
             )}
             {messages.map((message) => (

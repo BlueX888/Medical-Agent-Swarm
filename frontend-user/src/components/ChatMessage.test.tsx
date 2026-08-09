@@ -61,41 +61,4 @@ describe("consultation risk presentation", () => {
     expect(container.querySelector("pre")).not.toBeInTheDocument();
     expect(screen.queryByText(/"suggestions"/)).not.toBeInTheDocument();
   });
-
-  it("renders structured knowledge sources with safe external links", () => {
-    render(
-      <ChatMessageView
-        message={{
-          id: "message-with-source",
-          role: "assistant",
-          content: "慢性肾病管理需要个体化 [K1]。",
-          payload: {
-            riskLevel: "low",
-            suggestions: [],
-            disclaimer: "以上信息仅供参考。",
-            participants: ["健康咨询"],
-            sources: [
-              {
-                citation_id: "K1",
-                title: "慢性肾病指南",
-                source_org: "示例医学会",
-                version: "2026",
-                published_at: "2026-01-01",
-                section: "治疗目标",
-                external_url: "https://example.test/ckd"
-              }
-            ],
-            safetyChecked: true,
-            failed: false
-          }
-        }}
-      />
-    );
-
-    expect(screen.getByRole("heading", { name: "参考资料" })).toBeInTheDocument();
-    const sourceLink = screen.getByRole("link", { name: /慢性肾病指南/ });
-    expect(sourceLink).toHaveAttribute("href", "https://example.test/ckd");
-    expect(sourceLink).toHaveAttribute("target", "_blank");
-    expect(sourceLink).toHaveAttribute("rel", "noreferrer noopener");
-  });
 });

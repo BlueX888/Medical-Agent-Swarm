@@ -309,61 +309,6 @@ MEM0_CONFIG = {
 
 不配置 Mem0 时，核心问答和多 Agent 协作仍可正常运行。
 
-## 本地 RAG 医学知识库
-
-RAG 默认关闭。启用后，系统会在 Orchestrator 完成风险与意图判断后，按“回答是否会产生需要证据支持的医学事实或建议”决定是否检索。诊断、治疗、药物、预后、循证研究和生活方式建议必须检索；低/中风险症状分诊在需要提供病因、处理、观察或就医时机时也会检索。高危/急症、纯澄清、非医学交流和系统操作不会等待检索。知识库不可用时会降级到原有 Agent 流程，并且不会生成知识库引用。
-
-启动 Redis 与 Qdrant：
-
-```bash
-docker compose up -d redis qdrant
-```
-
-在 `.env` 中至少配置：
-
-```env
-RAG_ENABLED=true
-QDRANT_URL=http://127.0.0.1:6333
-RAG_ADMIN_TOKEN=replace-with-a-long-random-token
-```
-
-首次入库或检索会在本机加载配置的 Embedding 与重排模型。管理员通过 `X-Knowledge-Admin-Token` 调用以下异步管理接口：
-
-```text
-POST   /api/admin/knowledge/documents
-PUT    /api/admin/knowledge/documents/{document_id}
-GET    /api/admin/knowledge/documents
-DELETE /api/admin/knowledge/documents/{document_id}
-POST   /api/admin/knowledge/reindex
-POST   /api/admin/knowledge/imports/medquad
-GET    /api/admin/knowledge/jobs/{job_id}
-```
-
-上传使用 multipart，`file` 为 PDF、Markdown、HTML 或 UTF-8 TXT，`metadata` 为 JSON 字符串，例如 `{"title":"指南标题","source_org":"发布机构","version":"2026"}`。扫描型 PDF/OCR、DOCX、图片和自动网页抓取不在第一版范围内。
-
-导入 MedQuAD 前，将固定版本的数据集放到配置目录：
-
-```bash
-git clone https://github.com/abachaa/MedQuAD.git .data/sources/medquad
-git -C .data/sources/medquad checkout 577bd37b96c02d1833b2c9eed2de9f96964e96cb
-```
-
-导入器会校验 Git HEAD（非 Git 快照可提供 `.medquad-revision` 文件）以及全部 XML
-内容的 SHA-256，防止目录内容与配置 revision 不一致。MedQuAD 由 Asma Ben
-Abacha 和 Dina Demner-Fushman 发布，使用
-[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)；索引清单会保留作者、
-[论文引用](https://doi.org/10.1186/s12859-019-3119-4)、来源网址和切分/Embedding
-转换说明。
-
-Qdrant 默认使用 Compose 的 `qdrant_data` 命名卷持久化。不要在 Windows/WSL2
-上把宿主机目录直接 bind mount 到 `/qdrant/storage`；Qdrant 的 mmap 存储要求
-POSIX 文件系统语义，Docker Desktop 的 Windows 目录映射可能导致 collection 损坏。
-Linux 部署如需落盘到 `.data/qdrant/`，可在 POSIX 文件系统上覆盖该 volume 配置。
-
-随后使用知识库管理员令牌调用 `POST /api/admin/knowledge/imports/medquad`。导入器只索引有答案的问答，自动跳过 MedlinePlus 因版权要求移除答案的记录；任务进度可通过通用 Job 查询接口查看。数据集以 CC BY 4.0 使用，并在每个检索 chunk 中保留原始机构、页面 URL、问题类型、同义词和 UMLS CUI。
-
-RAG 接入将 LangGraph 状态版本提升为 `medical-swarm-v2-rag`；升级前尚未完成的 v1 checkpoint 不会被新图恢复，应在部署升级前结束或清理旧的进行中任务。
-
 ## 项目结构
 
 ```text

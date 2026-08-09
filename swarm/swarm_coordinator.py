@@ -29,7 +29,6 @@ from memory import (
     ShortTermMemory,
     create_short_term_memory,
 )
-from knowledge import KnowledgeBase, KnowledgeRuntime, create_knowledge_runtime
 
 from .medical_swarm_graph import MedicalSwarmGraph
 from .agent_catalog import AgentCatalog
@@ -38,7 +37,6 @@ from .agent_catalog import AgentCatalog
 class _LoopDefaults:
     init_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     short_term_memory: Optional[ShortTermMemory] = None
-    knowledge_runtime: Optional[KnowledgeRuntime] = None
 
 
 _LOOP_DEFAULTS_ATTRIBUTE = "_medical_swarm_defaults"
@@ -68,8 +66,6 @@ class SwarmCoordinator:
         checkpointer: Optional[Any] = None,
         run_lease: Optional[RunLeaseManager] = None,
         audit_store: Optional[AuditStore] = None,
-        enable_rag: Optional[bool] = None,
-        knowledge_base: Optional[KnowledgeBase] = None,
     ):
         self.llm_client = llm_client or LLMClient()
         self.enable_swarm = enable_swarm
@@ -81,16 +77,6 @@ class SwarmCoordinator:
         self.enable_short_term_memory = enable_short_term_memory
         self.enable_long_term_memory = enable_long_term_memory
         self.swarm_timeout_s = swarm_timeout_s
-        knowledge_runtime = None
-        if knowledge_base is None:
-            knowledge_runtime = create_knowledge_runtime()
-            knowledge_base = knowledge_runtime.knowledge_base
-        self.knowledge_base = knowledge_base
-        self.enable_rag = (
-            knowledge_runtime.settings.enabled
-            if enable_rag is None and knowledge_runtime is not None
-            else bool(enable_rag)
-        )
 
         self.consultation_agent = ConsultationAgent()
         self.diagnostic_agent = DiagnosticAgent()
@@ -124,8 +110,6 @@ class SwarmCoordinator:
             checkpointer=checkpointer,
             run_lease=run_lease,
             audit_store=audit_store,
-            knowledge_base=self.knowledge_base,
-            enable_rag=self.enable_rag,
         )
 
         logger.info(f"SwarmCoordinator initialized with {len(self.worker_pool)} workers")
@@ -167,7 +151,6 @@ class SwarmCoordinator:
             "enable_swarm": self.enable_swarm,
             "enable_short_term_memory": self.enable_short_term_memory,
             "enable_long_term_memory": self.enable_long_term_memory,
-            "enable_rag": bool(getattr(self, "enable_rag", False)),
             "swarm_timeout_s": (
                 swarm_timeout_s
                 if swarm_timeout_s is not None
@@ -192,7 +175,6 @@ class SwarmCoordinator:
                     "enable_swarm": self.enable_swarm,
                     "enable_short_term_memory": self.enable_short_term_memory,
                     "enable_long_term_memory": self.enable_long_term_memory,
-                    "enable_rag": bool(getattr(self, "enable_rag", False)),
                     "swarm_timeout_s": swarm_timeout_s or self.swarm_timeout_s,
                 },
                 metadata={
@@ -206,7 +188,6 @@ class SwarmCoordinator:
                     "enable_swarm": self.enable_swarm,
                     "enable_short_term_memory": self.enable_short_term_memory,
                     "enable_long_term_memory": self.enable_long_term_memory,
-                    "enable_rag": bool(getattr(self, "enable_rag", False)),
                     "swarm_timeout_s": swarm_timeout_s or self.swarm_timeout_s,
                     "worker_count": len(self.worker_pool),
                 },
@@ -295,7 +276,6 @@ async def process_with_swarm(
     enable_memory: bool = True,
     enable_short_term_memory: Optional[bool] = None,
     enable_long_term_memory: Optional[bool] = None,
-    enable_rag: Optional[bool] = None,
     swarm_timeout_s: Optional[float] = None,
     run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -320,7 +300,6 @@ async def process_with_swarm(
                 "enable_memory": enable_memory,
                 "enable_short_term_memory": short_term_enabled,
                 "enable_long_term_memory": long_term_enabled,
-                "enable_rag": enable_rag,
             },
         )
         if debug
@@ -331,8 +310,6 @@ async def process_with_swarm(
     async with defaults.init_lock:
         if defaults.short_term_memory is None:
             defaults.short_term_memory = await create_short_term_memory()
-        if defaults.knowledge_runtime is None:
-            defaults.knowledge_runtime = create_knowledge_runtime()
 
     async with _open_checkpointed_coordinator(
         short_term_memory=defaults.short_term_memory,
@@ -340,8 +317,6 @@ async def process_with_swarm(
         enable_memory=enable_memory,
         enable_short_term_memory=short_term_enabled,
         enable_long_term_memory=long_term_enabled,
-        enable_rag=enable_rag,
-        knowledge_runtime=defaults.knowledge_runtime,
         swarm_timeout_s=swarm_timeout_s or 120.0,
     ) as coordinator:
         try:
@@ -381,12 +356,9 @@ async def resume_with_swarm(
     async with defaults.init_lock:
         if defaults.short_term_memory is None:
             defaults.short_term_memory = await create_short_term_memory()
-        if defaults.knowledge_runtime is None:
-            defaults.knowledge_runtime = create_knowledge_runtime()
 
     async with _open_checkpointed_coordinator(
         short_term_memory=defaults.short_term_memory,
-        knowledge_runtime=defaults.knowledge_runtime,
     ) as coordinator:
         checkpoint = await coordinator.get_checkpoint(run_id, checkpoint_id)
         if checkpoint is None:
@@ -399,7 +371,6 @@ async def resume_with_swarm(
         coordinator.enable_long_term_memory = bool(
             values.get("enable_long_term_memory", True)
         )
-        coordinator.enable_rag = bool(values.get("enable_rag", False))
         coordinator.medical_graph.enable_swarm = coordinator.enable_swarm
         coordinator.medical_graph.enable_short_term_memory = (
             coordinator.enable_short_term_memory
@@ -407,7 +378,6 @@ async def resume_with_swarm(
         coordinator.medical_graph.enable_long_term_memory = (
             coordinator.enable_long_term_memory
         )
-        coordinator.medical_graph.enable_rag = coordinator.enable_rag
         collector = (
             DebugTraceCollector(
                 question=str(values.get("question") or ""),
@@ -446,16 +416,8 @@ async def _open_checkpointed_coordinator(
     enable_short_term_memory: Optional[bool] = None,
     enable_long_term_memory: Optional[bool] = None,
     swarm_timeout_s: float = 120.0,
-    enable_rag: Optional[bool] = None,
-    knowledge_runtime: Optional[KnowledgeRuntime] = None,
 ):
     settings = CheckpointSettings.from_env()
-    effective_knowledge_runtime = knowledge_runtime or create_knowledge_runtime()
-    effective_enable_rag = (
-        effective_knowledge_runtime.settings.enabled
-        if enable_rag is None
-        else bool(enable_rag)
-    )
     async with AsyncExitStack() as stack:
         checkpointer = await stack.enter_async_context(open_checkpointer(settings))
         run_lease = await stack.enter_async_context(open_run_lease(settings))
@@ -470,8 +432,6 @@ async def _open_checkpointed_coordinator(
             checkpointer=checkpointer,
             run_lease=run_lease,
             audit_store=audit_store,
-            enable_rag=effective_enable_rag,
-            knowledge_base=effective_knowledge_runtime.knowledge_base,
         )
 
 

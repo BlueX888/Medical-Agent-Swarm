@@ -52,8 +52,6 @@ MEDICAL_TEXT_KEYS = {
     "final_answer",
     "history",
     "historical_cases",
-    "knowledge_bundle",
-    "knowledge_context",
     "id_card",
     "input",
     "medical_history",

@@ -16,7 +16,6 @@ class MedicalSwarmState(TypedDict, total=False):
     enable_swarm: bool
     enable_short_term_memory: bool
     enable_long_term_memory: bool
-    enable_rag: bool
     question: str
     context: Dict[str, Any]
     enhanced_context: Dict[str, Any]
@@ -26,9 +25,6 @@ class MedicalSwarmState(TypedDict, total=False):
 
     recent_history: List[Dict[str, Any]]
     historical_cases: List[Dict[str, Any]]
-    knowledge_bundle: Dict[str, Any]
-    rag_status: str
-    grounded_sources: List[Dict[str, Any]]
     short_term_memory_error: Optional[str]
 
     assessment: Dict[str, Any]

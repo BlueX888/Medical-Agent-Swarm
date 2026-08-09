@@ -22,7 +22,7 @@ describe("live analysis card", () => {
           {
             id: "evidence",
             label: "资料核对",
-            summary: "正在核对本地医学资料。",
+            summary: "正在核对公开医学资料。",
             state: "active"
           },
           {
@@ -42,7 +42,7 @@ describe("live analysis card", () => {
 
     expect(screen.getByRole("heading", { name: "分析正在进行" })).toBeInTheDocument();
     expect(screen.getByText("资料核对")).toBeInTheDocument();
-    expect(screen.getByText("正在核对本地医学资料。")).toBeInTheDocument();
+    expect(screen.getByText("正在核对公开医学资料。")).toBeInTheDocument();
     expect(screen.getByText("1 项已确认")).toBeInTheDocument();
     expect(screen.getByText("展示结构化进度，不展示模型内部思维记录")).toBeInTheDocument();
   });

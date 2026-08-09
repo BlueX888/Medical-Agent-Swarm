@@ -30,8 +30,8 @@ describe("patient-facing analysis progress", () => {
           },
           {
             id: "evidence",
-            label: "资料与引用",
-            summary: "已检索 3 条候选资料，引用将在回答完成时校验。",
+            label: "资料核对",
+            summary: "医学证据检索角色正在按需核对公开医学资料。",
             state: "active"
           },
           {
@@ -57,7 +57,7 @@ describe("patient-facing analysis progress", () => {
 
     expect(screen.getByRole("heading", { name: "分析进度" })).toBeInTheDocument();
     expect(screen.getByText("本次分析摘要")).toBeInTheDocument();
-    expect(screen.getByText("已检索 3 条候选资料，引用将在回答完成时校验。")).toBeInTheDocument();
+    expect(screen.getByText("医学证据检索角色正在按需核对公开医学资料。")).toBeInTheDocument();
     expect(screen.getByText("这里展示可核验的步骤与结论，不包含模型内部思维记录。")).toBeInTheDocument();
     expect(screen.queryByText(/private|chain of thought/i)).not.toBeInTheDocument();
   });

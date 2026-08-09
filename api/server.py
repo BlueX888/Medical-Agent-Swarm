@@ -736,11 +736,6 @@ def _public_analysis_steps(
 ) -> List[Dict[str, str]]:
     """Build a patient-safe audit summary without exposing model reasoning or raw evidence."""
     route_output = _latest_public_event_output(events, "route_plan")
-    knowledge_output = _latest_public_event_output(events, "retrieve_knowledge")
-    grounding_event = _latest_public_event(events, "ground_and_cite")
-    grounding_output = grounding_event.get("output")
-    if not isinstance(grounding_output, dict):
-        grounding_output = {}
     terminal = raw_status in {"success", "failed", "timeout"}
     failed_terminal = raw_status in {"failed", "timeout"}
 
@@ -786,58 +781,35 @@ def _public_analysis_steps(
         focus_summary = "正在识别问题重点和需要回答的范围。"
         focus_state = "active" if current_phase in {"understanding", "planning"} else "pending"
 
-    knowledge_status = str(knowledge_output.get("status") or "")
-    knowledge_error = str(knowledge_output.get("error") or "")
-    result_source_count = _public_result_source_count(result_data)
-    if raw_status == "success":
-        grounded_source_count = result_source_count
-    elif failed_terminal:
-        grounded_source_count = 0
-    else:
-        grounded_source_count = max(
-            0,
-            _safe_public_int(grounding_output.get("used_sources")),
-        )
-    grounding_recorded = bool(grounding_event)
-    grounding_failed = str(grounding_event.get("status") or "") == "failed"
-    if grounded_source_count > 0:
-        evidence_summary = (
-            f"已引用 {grounded_source_count} 条本地医学资料，并完成引用校验。"
-        )
+    evidence_participant = next(
+        (
+            participant
+            for participant in participants
+            if participant.get("id") == "evidence_research"
+        ),
+        None,
+    )
+    evidence_participant_state = (
+        str(evidence_participant.get("state")) if evidence_participant else ""
+    )
+    if evidence_participant_state == "done":
+        evidence_summary = "医学证据检索角色已完成公开资料核对。"
         evidence_state = "done"
-    elif knowledge_status == "used" and (grounding_recorded or terminal):
-        evidence_summary = "已检索医学资料，但最终回答未生成可验证引用。"
-        if grounding_failed:
-            evidence_summary = "引用校验未能完成，最终回答不会声称引用了知识库。"
-        evidence_state = "attention"
-    elif knowledge_status == "used":
-        source_count = max(0, _safe_public_int(knowledge_output.get("source_count")))
-        evidence_summary = f"已检索 {source_count} 条候选资料，引用将在回答完成时校验。"
+    elif evidence_participant_state == "active":
+        evidence_summary = "医学证据检索角色正在按需核对公开医学资料。"
         evidence_state = "active"
-    elif knowledge_status == "empty":
-        evidence_summary = "本地资料未找到足够匹配内容，回答不会生成知识库引用。"
+    elif evidence_participant_state == "failed":
+        evidence_summary = "医学证据检索角色未完成资料核对。"
         evidence_state = "attention"
-    elif knowledge_status == "degraded":
-        evidence_summary = "医学资料库暂不可用，已降级为基础分析流程。"
-        evidence_state = "attention"
-    elif knowledge_status == "skipped" and knowledge_error == "urgent_request":
-        evidence_summary = "为避免延误高风险处置，本次跳过资料检索。"
-        evidence_state = "skipped"
-    elif knowledge_status == "skipped":
-        evidence_summary = "本次问题不需要调用医学资料库。"
-        evidence_state = "skipped"
-    elif knowledge_status == "disabled":
-        evidence_summary = "本次未启用医学资料检索。"
-        evidence_state = "skipped"
     elif failed_terminal:
-        evidence_summary = "本轮未完成资料与引用核对。"
+        evidence_summary = "本轮未完成资料核对。"
         evidence_state = "attention"
     elif raw_status == "success":
-        evidence_summary = "本轮未使用本地医学资料。"
+        evidence_summary = "本轮未安排独立的医学证据检索。"
         evidence_state = "skipped"
     else:
-        evidence_summary = "正在判断是否需要核对本地医学资料。"
-        evidence_state = "active" if current_phase in {"planning", "consulting"} else "pending"
+        evidence_summary = "正在判断是否需要医学证据检索角色参与。"
+        evidence_state = "pending"
 
     participant_labels = [
         str(participant.get("label"))
@@ -889,7 +861,7 @@ def _public_analysis_steps(
         {"id": "focus", "label": "本次重点", "summary": focus_summary, "state": focus_state},
         {
             "id": "evidence",
-            "label": "资料与引用",
+            "label": "资料核对",
             "summary": evidence_summary,
             "state": evidence_state,
         },
@@ -914,34 +886,6 @@ def _latest_public_event_output(
         if isinstance(output, dict):
             return output
     return {}
-
-
-def _latest_public_event(
-    events: List[Dict[str, Any]],
-    name: str,
-) -> Dict[str, Any]:
-    for event in reversed(events):
-        if str(event.get("name") or "") == name:
-            return event
-    return {}
-
-
-def _public_result_source_count(result_data: Dict[str, Any]) -> int:
-    sources = result_data.get("sources")
-    if not isinstance(sources, list):
-        return 0
-    return sum(
-        1
-        for source in sources
-        if isinstance(source, dict) and str(source.get("citation_id") or "")
-    )
-
-
-def _safe_public_int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
 
 
 def _find_public_risk_level(value: Any) -> Optional[str]:

@@ -17,7 +17,8 @@ MEM0_CONFIG = {
 # Short-term memory is configured with environment variables:
 #   REDIS_URL=redis://localhost:6379/0
 #   SHORT_TERM_MEMORY_TTL=86400
-#   SHORT_TERM_MEMORY_MAX_MESSAGES=40
+#   Hard-capped at 20 messages (10 complete turns)
+#   SHORT_TERM_MEMORY_MAX_MESSAGES=20
 
 # LangSmith observability is configured with environment variables:
 #   LANGSMITH_TRACING=true

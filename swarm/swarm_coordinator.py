@@ -250,7 +250,7 @@ class SwarmCoordinator:
             return summary
         result = state.get("result") or {}
         route = state.get("route") or state.get("mode") or "unknown"
-        if route not in {"single_agent", "swarm", "fallback"}:
+        if route not in {"single_task", "multiple_tasks", "safe_fallback"}:
             route = "unknown"
         timeout = bool(result.get("timeout_occurred"))
         agents = result.get("agents_involved", []) or []

@@ -6,19 +6,25 @@ Medical-Agent-Swarm 是一个基于 LangGraph 和 OpenAI 兼容接口构建的�
 
 > 本项目处于研究原型阶段，仅用于学习、开发和技术验证，不能替代医生的诊断、处方或治疗。
 
+## 系统架构
+
+![Medical-Agent-Swarm C4 容器架构图](assets/c4-container-architecture-v2.png)
+
+项目提供面向健康咨询者的独立前端、面向开发与测试人员的调试控制台，以及命令行和 Python 调用入口。所有入口共用 FastAPI、LangGraph、Agent、Skill 与 SafetyGuard 组成的编排运行时。Redis 用于短期会话记忆；Mem0 与 LangSmith 均为可选集成。
+
 ## 功能
 
 - 多智能体协作：根据问题复杂度组织不同 Agent 分工处理
 - 医疗 Skill：通过可发现的 Skill 扩展医疗问答流程
 - 风险识别：识别潜在高风险症状并给出就医紧迫性提示
 - 证据研究：支持网络搜索与多来源信息综合
-- 会话上下文：支持内存或 Redis 保存同一会话最近 20 轮对话
+- 会话上下文：使用 Redis 保存同一会话最近 10 轮对话
 - 输出安全检查：检查危险建议、过度诊断和用药风险
 - 多种使用方式：支持命令行、Python 调用和本地调试界面
 
 ## Orchestrator–Worker 工作流程
 
-![LangGraph 医疗多智能体系统流程图](assets/system-workflow.png)
+![LangGraph 医疗多智能体系统流程图](assets/langgraph-medical-multi-agent-workflow.png)
 
 LangGraph 执行以下固定流程：
 
@@ -94,6 +100,7 @@ Worker 仍应继承 `BaseAgent`、通过自身白名单注册 Skill，并由 `Ag
 
 - Python 3.10 或更高版本
 - 一个兼容 OpenAI API 格式的模型服务
+- Redis；本地开发推荐使用 Docker Compose 启动仓库内置服务
 - Node.js 和 npm，仅在使用前端调试界面时需要
 
 ## 快速开始
@@ -157,7 +164,15 @@ OPENAI_MAX_TOKENS=8192
 环境变量优先于 `config.py`；已有的 `config.py` 配置仍可继续使用。`.env`
 和 `config.py` 均已被 `.gitignore` 排除，请勿将真实 API Key 提交到 GitHub。
 
-### 5. 启动命令行程序
+### 5. 启动 Redis
+
+```bash
+docker compose up -d redis
+```
+
+如使用外部 Redis，请将 `REDIS_URL` 改为对应连接地址。项目不会在 Redis 不可用时回退到进程内存。
+
+### 6. 启动命令行程序
 
 ```bash
 python main.py
@@ -193,9 +208,9 @@ asyncio.run(main())
 
 ## Redis 短期记忆
 
-短期记忆保存用户问题、最终回答，以及用于恢复最终界面的风险级别、重点建议、免责声明和参与角色数量；不保存 Agent 中间过程或工具结果。默认保留最近 20 轮，并在 24 小时无活动后过期。
+短期记忆保存用户问题、最终回答，以及用于恢复最终界面的风险级别、重点建议、免责声明和参与角色数量；不保存 Agent 中间过程或工具结果。最多保留最近 10 轮，并在 24 小时无活动后过期；`SHORT_TERM_MEMORY_MAX_MESSAGES` 可以调低该上限，但不能调高。
 
-先启动 Redis：
+本地尚未启动 Redis 时执行：
 
 ```bash
 docker compose up -d redis
@@ -206,7 +221,7 @@ docker compose up -d redis
 ```env
 REDIS_URL=redis://localhost:6379/0
 SHORT_TERM_MEMORY_TTL=86400
-SHORT_TERM_MEMORY_MAX_MESSAGES=40
+SHORT_TERM_MEMORY_MAX_MESSAGES=20
 ```
 
 启动时 Redis 不可用会直接失败，不会回退到进程内存。查看 Redis 健康状态：
@@ -238,6 +253,12 @@ $env:REDIS_TEST_URL="redis://localhost:6379/0"
 python -m pytest -m integration tests/test_short_term_memory_redis.py
 ```
 
+## 工作流检查点
+
+LangGraph 工作流检查点默认加密保存在 `.data/checkpoints.sqlite3`，适合本地开发；生产环境可通过 `CHECKPOINT_BACKEND=postgres` 和 `CHECKPOINT_POSTGRES_DSN` 切换到 PostgreSQL。调试 API 的检查点查看与重放能力需要配置 `CHECKPOINT_ADMIN_TOKEN`。
+
+密钥、管理令牌和数据库连接信息都属于部署机密，不应提交到仓库。完整配置项及本地开发默认值见 [`.env.example`](.env.example)。
+
 ## 本地调试界面
 
 调试界面是可选功能，不影响命令行方式使用。
@@ -262,6 +283,16 @@ API 启动后可访问：
 
 - API 文档：`http://127.0.0.1:8000/docs`
 - 健康检查：`http://127.0.0.1:8000/api/health`
+
+常用 API：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 检查 API、Redis 和运行时状态 |
+| `POST` | `/api/consultations` | 创建脱敏的用户咨询 |
+| `GET` | `/api/consultations/{consultation_id}` | 查询咨询进度与最终结果 |
+| `GET` | `/api/sessions/{session_id}/memory` | 查询短期会话记忆 |
+| `DELETE` | `/api/sessions/{session_id}/memory` | 清除短期会话记忆 |
 
 ### 用户咨询界面
 
@@ -289,6 +320,26 @@ GET  /api/consultations/{consultation_id}  (X-Session-ID: <session_id>)
 ```bash
 cd frontend-user
 npm test
+```
+
+## 测试与验证
+
+运行不依赖真实外部服务的 Python 测试：
+
+```bash
+python -m pytest -m "not integration"
+```
+
+构建两个前端以执行 TypeScript 与生产构建检查：
+
+```bash
+cd frontend
+npm install
+npm run build
+
+cd ../frontend-user
+npm install
+npm run build
 ```
 
 ## 可选长期记忆
@@ -319,9 +370,11 @@ Medical-Agent-Swarm/
 |-- constraints/       # Agent 与 Swarm 约束规则
 |-- core/              # LLM 客户端、Agent Loop 和安全检查
 |-- frontend/          # React 调试界面
+|-- frontend-user/     # 面向健康咨询者的 React 界面
 |-- memory/            # 短期与可选长期记忆
 |-- research/          # 网络搜索和证据综合
 |-- swarm/             # LangGraph 编排与公共调用入口
+|-- tests/             # 单元测试与集成测试
 |-- validation/        # 输出修复工具
 |-- .env.example       # 环境变量配置模板
 |-- config.py.example  # 兼容旧版的 Python 配置模板
@@ -351,10 +404,9 @@ Medical-Agent-Swarm/
 
 使用者应自行评估模型、数据来源和部署方式的可靠性，并对实际使用结果负责。
 
-## LangSmith Observability
+## LangSmith 可观测性
 
-LangSmith tracing is optional and off by default. After installing dependencies,
-enable it with environment variables:
+LangSmith 追踪默认关闭。安装依赖后，可通过环境变量启用：
 
 ```powershell
 $env:LANGSMITH_TRACING = "true"
@@ -362,23 +414,15 @@ $env:LANGSMITH_API_KEY = "lsv2_your_langsmith_key"
 $env:LANGSMITH_PROJECT = "medical-agent-swarm"
 ```
 
-When enabled, traces include the top-level `medical_swarm_request`, LangGraph
-node spans such as `graph.plan_and_decompose`, `agent.<agent_id>`,
-`llm.<purpose>`, `tool.<tool_name>`, and `safety.runtime_guard`.
-Because this is a medical assistant prototype, message text, questions,
-answers, context, tool arguments, and similar payloads are redacted by default
-before they are sent to LangSmith. Use safe synthetic data before setting:
+启用后，追踪包含顶层 `medical_swarm_request`，以及 `graph.plan_and_decompose`、`agent.<agent_id>`、`llm.<purpose>`、`tool.<tool_name>` 和 `safety.runtime_guard` 等跨度。
+
+考虑到医疗数据的敏感性，系统默认会在发送到 LangSmith 前移除消息文本、问题、回答、上下文和工具参数等内容。只有在使用安全的合成数据时，才应关闭脱敏：
 
 ```powershell
 $env:LANGSMITH_REDACT_MEDICAL_TEXT = "false"
 ```
 
-Do not enable unredacted tracing with real patient information or other PHI.
-Set `OBSERVABILITY_HASH_KEY` to a deployment secret if a keyed `session_ref` is
-needed; without that key, no session reference is exported. See the
-[Agent Observability MVP runbook](docs/agent-observability-mvp-runbook.md) for
-the schema, dashboard queries, verification, incident response, and shutdown
-procedure.
+不要对真实患者信息或其他受保护健康信息启用未脱敏追踪。如需导出带密钥散列的 `session_ref`，请把 `OBSERVABILITY_HASH_KEY` 设置为部署机密；未配置时不会导出会话引用。数据结构、仪表盘查询、验证、事件响应和停用流程见 [Agent Observability MVP runbook](docs/agent-observability-mvp-runbook.md)。
 
 ## License
 

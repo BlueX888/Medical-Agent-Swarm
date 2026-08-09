@@ -275,10 +275,7 @@ class EvidenceSynthesizer:
         if report.sources:
             output += "## 【信息来源】\n"
             for i, source in enumerate(report.sources, 1):
-                if source["type"] == "web":
-                    output += f"{i}. {source['title']}\n"
-                    output += f"   {source['url']}\n"
-                else:
-                    output += f"{i}. {source['title']} (知识库)\n"
+                output += f"{i}. {source['title']}\n"
+                output += f"   {source['url']}\n"
 
         return output

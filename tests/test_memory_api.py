@@ -91,7 +91,11 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
         await coordinator.short_term_memory.save_turn(
             session_id,
             question,
-            "回答",
+            "回答 [K1]",
+            assistant_metadata={
+                "sources": [{"citation_id": "K1", "title": "旧知识库资料"}],
+                "risk_level": "low",
+            },
         )
         return {"answer": "回答", "session_id": session_id}
 
@@ -141,6 +145,7 @@ def test_memory_api_uses_application_short_term_memory_and_can_clear_a_session(
             "问题",
             "回答",
         ]
+        assert payload["recent_history"][1]["metadata"] == {"risk_level": "low"}
 
         deleted = client.delete("/api/sessions/session-api/memory")
         assert deleted.status_code == 200
@@ -323,7 +328,10 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
     collector.record_event(
         "planning",
         name="route_plan",
-        output={"private_reasoning": "must never be public"},
+        output={
+            "risk_level": "low",
+            "private_reasoning": "must never be public",
+        },
     )
     collector.record_event(
         "agent_loop",
@@ -342,13 +350,13 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
     )
     collector.finish_success(
         result_json={
-            "answer": "请尽快安排线下评估。",
+            "answer": "请尽快安排线下评估 [K1]。",
             "risk_level": "high",
             "suggestions": ["今天联系医生"],
             "disclaimer": "以上信息不能替代医生诊断。",
             "agents_involved": ["diagnostic_agent"],
         },
-        final_answer="请尽快安排线下评估。",
+        final_answer="请尽快安排线下评估 [K1]。",
     )
     server.RUN_STORE.add(collector)
 
@@ -367,7 +375,16 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
 
     assert allowed.status_code == 200
     payload = allowed.json()
-    assert payload == {
+    analysis_steps = payload["progress"]["analysis_steps"]
+    payload_without_analysis = {
+        **payload,
+        "progress": {
+            key: value
+            for key, value in payload["progress"].items()
+            if key != "analysis_steps"
+        },
+    }
+    assert payload_without_analysis == {
         "consultation_id": "public-consultation-success",
         "status": "success",
         "progress": {
@@ -397,12 +414,230 @@ def test_public_consultation_snapshot_is_session_scoped_and_sanitized(
         },
         "failure": None,
     }
+    assert analysis_steps[0] == {
+        "id": "risk",
+        "label": "风险预检",
+        "summary": "已识别需要优先处理的高风险信号，将先给出就医时机建议。",
+        "state": "attention",
+    }
+    assert analysis_steps[-1] == {
+        "id": "safety",
+        "label": "安全复核",
+        "summary": "已检查急症提醒、过度诊断和用药风险。",
+        "state": "done",
+    }
     assert wrong_session.status_code == 404
     assert missing_session.status_code == 404
     serialized = repr(payload)
     assert "sensitive" not in serialized
     assert "private" not in serialized
     assert "diagnostic_agent" not in serialized
+
+
+def test_public_consultation_exposes_a_safe_structured_analysis_summary(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private patient question",
+        session_id="session-analysis-summary",
+        run_id="public-analysis-summary",
+        metadata={"source": "consultation_api"},
+    )
+    collector.record_event(
+        "planning",
+        name="route_plan",
+        output={
+            "intents": ["lifestyle_guidance", "symptom_triage"],
+            "risk_level": "low",
+            "private_reasoning": "never expose this chain of thought",
+            "tasks": [
+                {
+                    "assigned_agent": "consultation_agent",
+                    "goal": "private task instructions",
+                },
+                {
+                    "assigned_agent": "research_agent",
+                    "goal": "private task instructions",
+                },
+            ],
+        },
+    )
+    collector.record_event("routing", name="route_by_subtasks")
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-analysis-summary",
+            headers={"X-Session-ID": "session-analysis-summary"},
+        )
+
+    assert response.status_code == 200
+    steps = response.json()["progress"]["analysis_steps"]
+    assert steps == [
+        {
+            "id": "risk",
+            "label": "风险预检",
+            "summary": "当前信息未触发高风险路径，仍会保留症状加重时的就医提醒。",
+            "state": "done",
+        },
+        {
+            "id": "focus",
+            "label": "本次重点",
+            "summary": "本次重点：可执行的生活调整、风险与就医时机。",
+            "state": "done",
+        },
+        {
+            "id": "evidence",
+            "label": "资料核对",
+            "summary": "医学证据检索角色正在按需核对公开医学资料。",
+            "state": "active",
+        },
+        {
+            "id": "collaboration",
+            "label": "协作分工",
+            "summary": "已安排 2 个分析角色：健康咨询、医学证据检索。",
+            "state": "active",
+        },
+        {
+            "id": "safety",
+            "label": "安全复核",
+            "summary": "回答生成后将检查急症提醒、过度诊断和用药风险。",
+            "state": "pending",
+        },
+    ]
+    serialized = repr(response.json())
+    assert "private" not in serialized
+    assert "chain of thought" not in serialized
+    assert "private task instructions" not in serialized
+
+
+def test_public_consultation_reports_completed_research_role(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private evidence question",
+        session_id="session-research-summary",
+        run_id="public-research-summary",
+        metadata={"source": "consultation_api"},
+    )
+    collector.record_event(
+        "planning",
+        name="route_plan",
+        output={
+            "risk_level": "low",
+            "intents": ["evidence_research"],
+            "tasks": [{"assigned_agent": "research_agent"}],
+        },
+    )
+    collector.record_event(
+        "agent_loop",
+        name="agent_loop",
+        agent_id="research_agent",
+        output={"private_answer": "never expose"},
+    )
+    collector.record_event(
+        "safety_check",
+        name="runtime_safety_guard",
+        output={"safety_checked": True},
+    )
+    collector.finish_success(
+        result_json={
+            "answer": "已完成资料核对。",
+            "risk_level": "low",
+            "agents_involved": ["research_agent"],
+        },
+        final_answer="已完成资料核对。",
+    )
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-research-summary",
+            headers={"X-Session-ID": "session-research-summary"},
+        )
+
+    assert response.status_code == 200
+    evidence = next(
+        step
+        for step in response.json()["progress"]["analysis_steps"]
+        if step["id"] == "evidence"
+    )
+    assert evidence == {
+        "id": "evidence",
+        "label": "资料核对",
+        "summary": "医学证据检索角色已完成公开资料核对。",
+        "state": "done",
+    }
+    assert "sources" not in response.json()["result"]
+    assert "private" not in repr(response.json())
+
+
+def test_public_success_without_safety_proof_never_reports_an_active_review(
+    monkeypatch,
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    async def create_application_short_term_memory():
+        return memory
+
+    monkeypatch.setattr(
+        server,
+        "create_short_term_memory",
+        create_application_short_term_memory,
+    )
+    collector = DebugTraceCollector(
+        question="private question",
+        session_id="session-no-safety-proof",
+        run_id="public-no-safety-proof",
+        metadata={"source": "consultation_api"},
+    )
+    collector.finish_success(
+        result_json={"answer": "回答已生成。", "risk_level": "low"},
+        final_answer="回答已生成。",
+    )
+    server.RUN_STORE.add(collector)
+
+    with TestClient(server.app) as client:
+        response = client.get(
+            "/api/consultations/public-no-safety-proof",
+            headers={"X-Session-ID": "session-no-safety-proof"},
+        )
+
+    assert response.status_code == 200
+    safety = next(
+        step
+        for step in response.json()["progress"]["analysis_steps"]
+        if step["id"] == "safety"
+    )
+    assert safety == {
+        "id": "safety",
+        "label": "安全复核",
+        "summary": "未记录完成安全复核，不能把本轮回答标记为已通过。",
+        "state": "attention",
+    }
 
 
 def test_public_consultation_can_be_created_without_exposing_debug_run(
@@ -569,7 +804,13 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         )
 
     assert running_response.status_code == 200
-    assert running_response.json()["progress"] == {
+    running_progress = running_response.json()["progress"]
+    running_analysis = running_progress["analysis_steps"]
+    assert {
+        key: value
+        for key, value in running_progress.items()
+        if key != "analysis_steps"
+    } == {
         "current_phase": "consulting",
         "completed_phases": ["understanding", "planning"],
         "participants": [
@@ -578,13 +819,23 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         ],
         "safety_checked": False,
     }
+    assert next(step for step in running_analysis if step["id"] == "collaboration") == {
+        "id": "collaboration",
+        "label": "协作分工",
+        "summary": "已安排 2 个分析角色：健康咨询、医学证据检索。",
+        "state": "active",
+    }
     assert single_response.status_code == 200
     assert single_response.json()["progress"]["participants"] == [
         {"id": "symptom_analysis", "label": "风险与症状分析", "state": "active"}
     ]
     failure = failed_response.json()
     assert failure["status"] == "failed"
-    assert failure["progress"] == {
+    assert {
+        key: value
+        for key, value in failure["progress"].items()
+        if key != "analysis_steps"
+    } == {
         "current_phase": "consulting",
         "completed_phases": ["understanding", "planning"],
         "participants": [
@@ -598,6 +849,20 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         "message": "本次分析未能完成，请重新尝试；如症状严重或正在加重，请及时线下就医。",
         "retryable": True,
     }
+    assert all(
+        step["state"] != "active"
+        for step in failure["progress"]["analysis_steps"]
+    )
+    assert next(
+        step
+        for step in failure["progress"]["analysis_steps"]
+        if step["id"] == "evidence"
+    ) == {
+        "id": "evidence",
+        "label": "资料核对",
+        "summary": "本轮未完成资料核对。",
+        "state": "attention",
+    }
     assert "credential" not in repr(failure)
     assert "stack trace" not in repr(failure)
     assert "worker failure" not in repr(failure)
@@ -610,6 +875,10 @@ def test_public_consultation_reports_running_roles_and_safe_failure(
         "consulting",
     ]
     assert timeout["progress"]["safety_checked"] is False
+    assert all(
+        step["state"] != "active"
+        for step in timeout["progress"]["analysis_steps"]
+    )
     assert timeout["result"] is None
     assert timeout["failure"]["code"] == "analysis_timeout"
     assert timeout["failure"]["retryable"] is True

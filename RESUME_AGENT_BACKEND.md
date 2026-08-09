@@ -13,7 +13,7 @@
 - 设计可发现、可扩展的医疗 **Skill / Function Calling** 体系，Worker 仅能自主调用白名单内的问诊信息采集、风险评估、症状分析、生活方式建议和深度研究工具，实现规划权与工具执行权分离，限制 Agent 越权调用。
 - 建立医疗场景三层安全防线：规划前通过确定性规则识别急症信号，路由阶段强制高风险请求优先分诊，输出阶段由 `SafetyGuard` 检查危险用药建议、过度诊断、急症提示和免责声明，避免外部检索阻塞紧急就医建议。
 - 搭建 **FastAPI 异步后端**，通过 `asyncio` 后台执行 Agent 任务，提供任务创建、状态与事件查询、Agent/Skill 元数据、会话管理和健康检查等 9 个 REST API；使用 Pydantic 统一 API 与 Agent 路由的数据契约。
-- 基于 **Redis** 实现会话级短期记忆，使用事务 Pipeline 完成消息原子追加、定长裁剪和 TTL 刷新，默认保存最近 20 轮对话、24 小时过期；通过同会话异步锁保证请求顺序，并以健康检查和 HTTP 503 显式暴露存储故障。
+- 基于 **Redis** 实现会话级短期记忆，使用事务 Pipeline 完成消息原子追加、定长裁剪和 TTL 刷新，默认保存最近 10 轮对话、24 小时过期；通过同会话异步锁保证请求顺序，并以健康检查和 HTTP 503 显式暴露存储故障。
 - 建立覆盖 LangGraph 节点、Agent、LLM、Tool 和 SafetyGuard 的可观测链路，支持本地结构化事件追踪及可选 LangSmith Trace；对医疗文本和敏感字段进行脱敏，并使用 HMAC 生成不可逆会话标识。使用 Pytest 覆盖路由、依赖调度、Skill 权限、记忆、API 和可观测性，**96 项非集成测试全部通过**。
 
 ## 一页简历精简版
@@ -24,7 +24,7 @@ Python、LangGraph、OpenAI SDK、FastAPI、Pydantic、Redis、asyncio、LangSmi
 - 基于 LangGraph 实现 Orchestrator–Worker 多 Agent 工作流，通过强类型 `RoutePlan` 完成意图识别、任务拆解、Worker 能力匹配及单 Agent / 并行 / 串行依赖调度。
 - 设计 Agent Catalog、Skill 自动发现与工具白名单机制，使 Worker 通过 Function Calling 自主选择医疗工具；增加任务预算、重复任务、循环依赖和能力匹配校验，对异常规划自动修复或安全降级。
 - 建立“急症规则预检 + 高风险优先分诊 + 输出 SafetyGuard”三层防护，降低越权工具调用、危险用药建议和过度诊断风险。
-- 使用 FastAPI、asyncio 和 Redis Pipeline 实现异步任务 API、最近 20 轮会话记忆、24 小时 TTL、同会话串行化与故障感知；接入脱敏链路追踪，96 项非集成自动化测试全部通过。
+- 使用 FastAPI、asyncio 和 Redis Pipeline 实现异步任务 API、最近 10 轮会话记忆、24 小时 TTL、同会话串行化与故障感知；接入脱敏链路追踪，96 项非集成自动化测试全部通过。
 
 ## 极简版
 

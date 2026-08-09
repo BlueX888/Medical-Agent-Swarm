@@ -21,10 +21,6 @@ from .long_term import (
     LongTermMemory,
     LongTermMemoryWriteUnknown,
 )
-from .evidence_cache import (
-    EvidenceMemory
-)
-
 # 本地 Markdown 持久化
 from .session_summary import (
     SessionSummary,
@@ -47,7 +43,6 @@ __all__ = [
     'create_short_term_memory',
     'LongTermMemory',
     'LongTermMemoryWriteUnknown',
-    'EvidenceMemory',
     # 本地持久化类
     'SessionSummary',
     'SessionSummaryManager',

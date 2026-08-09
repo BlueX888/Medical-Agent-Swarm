@@ -3,7 +3,12 @@ from unittest.mock import ANY
 
 import pytest
 
-from memory import ShortTermMemory, ShortTermMemoryUnavailable, create_short_term_memory
+from memory import (
+    RedisShortTermMemoryAdapter,
+    ShortTermMemory,
+    ShortTermMemoryUnavailable,
+    create_short_term_memory,
+)
 
 
 @pytest.mark.asyncio
@@ -81,6 +86,32 @@ async def test_sessions_are_isolated_and_history_is_limited_by_complete_turns(
         message["content"]
         for message in await memory.load_context("session-b", max_turns=10)
     ] == ["另一会话", "另一回答"]
+
+
+@pytest.mark.asyncio
+async def test_default_history_keeps_only_the_ten_most_recent_turns(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory()
+
+    for index in range(11):
+        await memory.save_turn(
+            "ten-turn-session",
+            f"问题 {index}",
+            f"回答 {index}",
+        )
+
+    assert [
+        message["content"]
+        for message in await memory.load_context(
+            "ten-turn-session",
+            max_turns=11,
+        )
+    ] == [
+        content
+        for index in range(1, 11)
+        for content in (f"问题 {index}", f"回答 {index}")
+    ]
 
 
 @pytest.mark.asyncio
@@ -185,3 +216,26 @@ def test_memory_named_adapter_is_rejected():
 
     with pytest.raises(ValueError, match="must use the Redis backend"):
         ShortTermMemory(adapter=MemoryNamedAdapter())
+
+
+def test_history_configuration_cannot_exceed_ten_turns(
+    short_term_memory_factory,
+):
+    memory = short_term_memory_factory(max_messages=40)
+
+    assert memory.max_messages == 20
+
+
+def test_redis_adapter_cannot_be_configured_above_ten_turns(monkeypatch):
+    monkeypatch.setattr(
+        RedisShortTermMemoryAdapter,
+        "_create_client",
+        lambda *args, **kwargs: object(),
+    )
+
+    adapter = RedisShortTermMemoryAdapter(
+        ttl_seconds=60,
+        max_messages=40,
+    )
+
+    assert adapter.max_messages == 20

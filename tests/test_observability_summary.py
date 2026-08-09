@@ -12,7 +12,7 @@ def test_debug_run_summary_matches_root_observability_shape():
         question="private medical question",
         started_at=started,
         ended_at=started + timedelta(milliseconds=1250),
-        route="swarm",
+        route="multiple_tasks",
         status="success",
         final_answer="private answer",
     )
@@ -50,7 +50,7 @@ def test_debug_run_summary_matches_root_observability_shape():
 
     assert summary == {
         "status": "success",
-        "route": "swarm",
+        "route": "multiple_tasks",
         "duration_ms": 1250.0,
         "agent_count": 2,
         "llm_call_count": 1,

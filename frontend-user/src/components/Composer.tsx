@@ -71,7 +71,7 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
           id="health-question"
           rows={1}
           maxLength={2000}
-          placeholder={busy ? "会诊进行中，请稍候……" : "描述症状、持续时间和伴随情况……"}
+          placeholder={busy ? "分析进行中，请稍候……" : "描述症状、持续时间和伴随情况……"}
           value={value}
           disabled={disabled}
           aria-describedby="composer-help"
@@ -89,9 +89,9 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
           className="send-button"
           onClick={onSend}
           disabled={disabled || !value.trim()}
-          aria-label={hasMessages ? "继续提问" : "开始会诊"}
+          aria-label={hasMessages ? "继续提问" : "开始分析"}
         >
-          <span>{hasMessages ? "继续提问" : "开始会诊"}</span>
+          <span>{hasMessages ? "继续提问" : "开始分析"}</span>
           <ArrowUp size={18} aria-hidden="true" />
         </button>
       </div>

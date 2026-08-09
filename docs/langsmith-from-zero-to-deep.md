@@ -391,7 +391,7 @@ medical_swarm_request
 先回答四个问题：
 
 1. `status` 是 `success`、`failed`、`timeout`、`blocked` 还是 `degraded`？
-2. `route` 是 `single_agent`、`swarm` 还是 `fallback`？
+2. `route` 是 `single_task`、`multiple_tasks` 还是 `safe_fallback`？
 3. 总耗时是否异常？
 4. `safety_checked` 与 `safety_passed` 是否符合预期？
 
@@ -497,7 +497,7 @@ medical_swarm_request
 
 1. 比较 `llm_call_count`：调用次数增加还是单次 Prompt 变长？
 2. 按 Agent 分组：哪个 Agent 的 Token 增长？
-3. 检查是否从 `single_agent` 变成 `swarm`。
+3. 检查是否从 `single_task` 变成 `multiple_tasks`。
 4. 检查是否出现多次工具循环或重试。
 5. 使用 `app.version` 对比变更前后。
 
@@ -530,7 +530,7 @@ LangSmith 默认只保留安全摘要，因此需要与本地 Debug Trace 配合
 | `entrypoint` | `api` / `cli` / `python` / `benchmark` | 区分入口 |
 | `run_id` | UUID | 与本地 Debug Run 对照 |
 | `session_ref` | HMAC 摘要 | 安全关联会话 |
-| `route` | `single_agent` / `swarm` / `fallback` | 分析路由 |
+| `route` | `single_task` / `multiple_tasks` / `safe_fallback` | 分析路由 |
 | `agent_id` | `diagnostic_agent` 等 | 分析 Agent |
 | `graph_node` | Graph 节点名 | 分析节点 |
 | `status` | `success` / `failed` 等 | 分析结果 |
@@ -538,7 +538,7 @@ LangSmith 默认只保留安全摘要，因此需要与本地 Debug Trace 配合
 建议先保存这些视图：
 
 1. `production + failed/timeout/degraded`
-2. `route=fallback`
+2. `route=safe_fallback`
 3. `tool.outcome=blocked/error/timeout`
 4. `safety.executed=false OR safety.outcome=error`
 5. 最近 24 小时最慢 Trace
@@ -950,7 +950,7 @@ Annotation Queue 可以让评审人员按统一 rubric 给 Run 打分，官方�
 
 - `safety.executed == true`；
 - `status` 不为 `failed/timeout`；
-- `route=fallback` 比例；
+- `route=safe_fallback` 比例；
 - Tool error 比例；
 - 输出结构完整性。
 
@@ -982,7 +982,7 @@ LangSmith 会为 Project 提供预建 Dashboard，也可以创建自定义图表
 
 - 5 分钟内错误率高于基线；
 - P95 延迟持续升高；
-- `route=fallback` 比例突增；
+- `route=safe_fallback` 比例突增；
 - `safety_error=true` 出现；
 - `safety_checked=false` 出现；
 - Tool timeout 比例异常；

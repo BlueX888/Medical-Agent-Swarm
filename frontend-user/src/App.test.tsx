@@ -24,16 +24,32 @@ describe("health consultation entry", () => {
     });
   });
 
-  it("fills an example into the focused composer without sending it", async () => {
+  it("offers three analysis paths and fills the chosen example without sending it", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByText("说说最担心的症状")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "最近两天头痛并伴有恶心，需要马上就医吗？" }));
+    expect(await screen.findByText("从最想解决的健康问题开始")).toBeInTheDocument();
+    expect(screen.getByText("快速判断")).toBeInTheDocument();
+    expect(screen.getByText("综合计划")).toBeInTheDocument();
+    expect(screen.getByText("风险优先")).toBeInTheDocument();
+
+    const question = "低烧两天，最高 38.1℃，精神和食欲还可以，需要去医院吗？";
+    const quickExample = screen.getByRole("button", { name: `快速判断 ${question}` });
+    expect(quickExample).toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "综合计划 体检发现轻度脂肪肝，目前没有不适。请分别总结相关指南的核心结论，并给我一份一周饮食和运动计划。"
+    })).toBeInTheDocument();
+    expect(screen.getByRole("button", {
+      name: "风险优先 近一周头痛、恶心、视物模糊，而且持续加重。请先判断是否需要尽快就医，再根据风险判断检索相关指南，说明下一步应做哪些检查。"
+    })).toBeInTheDocument();
+    expect(quickExample).toHaveAccessibleDescription("一个重点，快速分析");
+
+    await user.click(quickExample);
 
     const composer = screen.getByRole("textbox", { name: "描述你的症状或健康问题" });
-    expect(composer).toHaveValue("最近两天头痛并伴有恶心，需要马上就医吗？");
+    expect(composer).toHaveValue(question);
     expect(composer).toHaveFocus();
+    expect(quickExample).toHaveAttribute("aria-pressed", "true");
     expect(api.createConsultation).not.toHaveBeenCalled();
   });
 
@@ -65,7 +81,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "胸痛并且呼吸困难");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
 
     expect(await screen.findByText("请立即联系急救服务。")).toBeInTheDocument();
     expect(screen.getByText("急症警示")).toBeInTheDocument();
@@ -124,7 +140,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "持续头晕两天");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
 
     expect((await screen.findAllByText("分析中")).length).toBeGreaterThan(0);
     expect(await screen.findByText("分析已经完成。")).toBeInTheDocument();
@@ -173,7 +189,7 @@ describe("health consultation entry", () => {
     const composer = await screen.findByRole("textbox", { name: "描述你的症状或健康问题" });
     await waitFor(() => expect(composer).toBeEnabled());
     await user.type(composer, "持续头痛");
-    await user.click(screen.getByRole("button", { name: "开始会诊" }));
+    await user.click(screen.getByRole("button", { name: "开始分析" }));
     await user.click(await screen.findByRole("button", { name: "重新分析" }));
 
     expect(await screen.findByText("重新分析已完成。")).toBeInTheDocument();
@@ -184,7 +200,7 @@ describe("health consultation entry", () => {
   it("validates age in the health profile drawer", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByText("说说最担心的症状");
+    await screen.findByText("从最想解决的健康问题开始");
 
     const profileTrigger = screen.getByRole("button", { name: /健康资料/ });
     await user.click(profileTrigger);

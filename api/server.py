@@ -21,6 +21,7 @@ from core.checkpointing import (
     open_checkpointer,
     open_run_lease,
 )
+from core.response_content import sanitize_user_visible_answer
 from debug import DebugTraceCollector, InMemoryTraceStore
 from memory import (
     LongTermMemory,
@@ -62,6 +63,16 @@ PUBLIC_AGENT_ROLES = {
     "consultation_agent": ("health_consultation", "健康咨询"),
     "diagnostic_agent": ("symptom_analysis", "风险与症状分析"),
     "research_agent": ("evidence_research", "医学证据检索"),
+}
+PUBLIC_INTENT_LABELS = {
+    "symptom_triage": "风险与就医时机",
+    "diagnostic_reasoning": "可能原因与判断依据",
+    "treatment_guidance": "处理与治疗选择",
+    "medication_guidance": "用药信息与风险",
+    "prognosis_guidance": "恢复过程与预后",
+    "lifestyle_guidance": "可执行的生活调整",
+    "evidence_research": "医学资料与证据",
+    "general_consultation": "一般健康建议",
 }
 
 
@@ -390,6 +401,27 @@ async def get_agents(enable_swarm: bool = True) -> List[AgentInfo]:
     return agents
 
 
+def _sanitize_public_memory_history(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    sanitized: List[Dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        if item.get("role") == "assistant":
+            item["content"] = sanitize_user_visible_answer(
+                str(item.get("content") or "")
+            )
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                item["metadata"] = {
+                    key: value
+                    for key, value in metadata.items()
+                    if key != "sources"
+                }
+        sanitized.append(item)
+    return sanitized
+
+
 @app.get("/api/sessions/{session_id}/memory", response_model=MemoryResponse)
 async def get_session_memory(
     request: Request,
@@ -409,7 +441,7 @@ async def get_session_memory(
             status_code=503,
             detail="Short-term memory backend unavailable",
         ) from exc
-    recent_history = recent_history[-limit:]
+    recent_history = _sanitize_public_memory_history(recent_history[-limit:])
     historical_cases = (
         LONG_TERM_MEMORY.search_similar_sessions(query=query, limit=min(limit, 10))
         if query
@@ -572,6 +604,7 @@ def _build_public_consultation_snapshot(
 
     result_json = run.get("result_json")
     result_data = result_json if isinstance(result_json, dict) else {}
+    safety_checked = _public_safety_checked(events)
     result = None
     failure = None
     if raw_status == "success":
@@ -583,7 +616,9 @@ def _build_public_consultation_snapshot(
         ]
         visible_agent_ids = result_agent_ids or agent_ids
         result = {
-            "answer": str(run.get("final_answer") or result_data.get("answer") or ""),
+            "answer": sanitize_user_visible_answer(
+                str(run.get("final_answer") or result_data.get("answer") or "")
+            ),
             "risk_level": risk_level,
             "suggestions": _string_list(result_data.get("suggestions")),
             "disclaimer": str(result_data.get("disclaimer") or ""),
@@ -608,7 +643,15 @@ def _build_public_consultation_snapshot(
             "current_phase": current_phase,
             "completed_phases": completed_phases,
             "participants": participants,
-            "safety_checked": _public_safety_checked(events),
+            "analysis_steps": _public_analysis_steps(
+                events=events,
+                current_phase=current_phase,
+                raw_status=raw_status,
+                participants=participants,
+                safety_checked=safety_checked,
+                result_data=result_data,
+            ),
+            "safety_checked": safety_checked,
         },
         "result": result,
         "failure": failure,
@@ -704,6 +747,169 @@ def _public_safety_checked(events: List[Dict[str, Any]]) -> bool:
         if isinstance(output, dict) and output.get("safety_checked") is True:
             return True
     return False
+
+
+def _public_analysis_steps(
+    *,
+    events: List[Dict[str, Any]],
+    current_phase: str,
+    raw_status: str,
+    participants: List[Dict[str, str]],
+    safety_checked: bool,
+    result_data: Dict[str, Any],
+) -> List[Dict[str, str]]:
+    """Build a patient-safe audit summary without exposing model reasoning or raw evidence."""
+    route_output = _latest_public_event_output(events, "route_plan")
+    terminal = raw_status in {"success", "failed", "timeout"}
+    failed_terminal = raw_status in {"failed", "timeout"}
+
+    route_risk = _find_public_risk_level(route_output or {})
+    result_risk = _find_public_risk_level(result_data)
+    risk_level = result_risk if terminal and result_risk else route_risk or result_risk
+    if risk_level in {"high", "emergency"}:
+        risk_summary = "已识别需要优先处理的高风险信号，将先给出就医时机建议。"
+        risk_state = "attention"
+    elif risk_level == "medium":
+        risk_summary = "已识别需要重点留意的风险因素，将说明观察与就医时机。"
+        risk_state = "attention"
+    elif risk_level == "low":
+        risk_summary = "当前信息未触发高风险路径，仍会保留症状加重时的就医提醒。"
+        risk_state = "done"
+    elif failed_terminal:
+        risk_summary = "本轮未完成风险预检，不能据此判断风险高低。"
+        risk_state = "attention"
+    elif raw_status == "success":
+        risk_summary = "本轮未形成明确的风险等级，请按回答中的就医提示观察。"
+        risk_state = "attention"
+    else:
+        risk_summary = "正在检查是否有需要优先处理的危险信号。"
+        risk_state = "active" if current_phase in {"understanding", "planning"} else "pending"
+
+    intent_labels: List[str] = []
+    raw_intents = route_output.get("intents") if isinstance(route_output, dict) else None
+    if isinstance(raw_intents, list):
+        for value in raw_intents:
+            label = PUBLIC_INTENT_LABELS.get(str(value))
+            if label and label not in intent_labels:
+                intent_labels.append(label)
+    if intent_labels:
+        focus_summary = f"本次重点：{'、'.join(intent_labels)}。"
+        focus_state = "done"
+    elif failed_terminal:
+        focus_summary = "本轮未完成问题重点识别。"
+        focus_state = "attention"
+    elif raw_status == "success":
+        focus_summary = "本轮由基础分析流程完成，未记录可展示的问题分类。"
+        focus_state = "done"
+    else:
+        focus_summary = "正在识别问题重点和需要回答的范围。"
+        focus_state = "active" if current_phase in {"understanding", "planning"} else "pending"
+
+    evidence_participant = next(
+        (
+            participant
+            for participant in participants
+            if participant.get("id") == "evidence_research"
+        ),
+        None,
+    )
+    evidence_participant_state = (
+        str(evidence_participant.get("state")) if evidence_participant else ""
+    )
+    if evidence_participant_state == "done":
+        evidence_summary = "医学证据检索角色已完成公开资料核对。"
+        evidence_state = "done"
+    elif evidence_participant_state == "active":
+        evidence_summary = "医学证据检索角色正在按需核对公开医学资料。"
+        evidence_state = "active"
+    elif evidence_participant_state == "failed":
+        evidence_summary = "医学证据检索角色未完成资料核对。"
+        evidence_state = "attention"
+    elif failed_terminal:
+        evidence_summary = "本轮未完成资料核对。"
+        evidence_state = "attention"
+    elif raw_status == "success":
+        evidence_summary = "本轮未安排独立的医学证据检索。"
+        evidence_state = "skipped"
+    else:
+        evidence_summary = "正在判断是否需要医学证据检索角色参与。"
+        evidence_state = "pending"
+
+    participant_labels = [
+        str(participant.get("label"))
+        for participant in participants
+        if participant.get("label")
+    ]
+    participant_states = {str(participant.get("state")) for participant in participants}
+    if participant_labels:
+        collaboration_summary = (
+            f"已安排 {len(participant_labels)} 个分析角色：{'、'.join(participant_labels)}。"
+        )
+        if "failed" in participant_states:
+            collaboration_state = "attention"
+        elif raw_status == "success" or participant_states <= {"done"}:
+            collaboration_state = "done"
+        elif "active" in participant_states:
+            collaboration_state = "active"
+        else:
+            collaboration_state = "pending"
+    else:
+        if failed_terminal:
+            collaboration_summary = "本轮未完成分析角色分工。"
+            collaboration_state = "attention"
+        elif raw_status == "success":
+            collaboration_summary = "本轮由基础分析流程完成。"
+            collaboration_state = "done"
+        else:
+            collaboration_summary = "正在按问题类型安排合适的分析角色。"
+            collaboration_state = "active" if current_phase == "planning" else "pending"
+
+    if safety_checked:
+        safety_summary = "已检查急症提醒、过度诊断和用药风险。"
+        safety_state = "done"
+    elif raw_status in {"failed", "timeout"}:
+        safety_summary = "本轮安全复核未完成，不会把未核对内容标记为已通过。"
+        safety_state = "attention"
+    elif raw_status == "success":
+        safety_summary = "未记录完成安全复核，不能把本轮回答标记为已通过。"
+        safety_state = "attention"
+    elif current_phase in {"safety_review", "finalizing"}:
+        safety_summary = "正在检查急症提醒、过度诊断和用药风险。"
+        safety_state = "active"
+    else:
+        safety_summary = "回答生成后将检查急症提醒、过度诊断和用药风险。"
+        safety_state = "pending"
+
+    return [
+        {"id": "risk", "label": "风险预检", "summary": risk_summary, "state": risk_state},
+        {"id": "focus", "label": "本次重点", "summary": focus_summary, "state": focus_state},
+        {
+            "id": "evidence",
+            "label": "资料核对",
+            "summary": evidence_summary,
+            "state": evidence_state,
+        },
+        {
+            "id": "collaboration",
+            "label": "协作分工",
+            "summary": collaboration_summary,
+            "state": collaboration_state,
+        },
+        {"id": "safety", "label": "安全复核", "summary": safety_summary, "state": safety_state},
+    ]
+
+
+def _latest_public_event_output(
+    events: List[Dict[str, Any]],
+    name: str,
+) -> Dict[str, Any]:
+    for event in reversed(events):
+        if str(event.get("name") or "") != name:
+            continue
+        output = event.get("output")
+        if isinstance(output, dict):
+            return output
+    return {}
 
 
 def _find_public_risk_level(value: Any) -> Optional[str]:

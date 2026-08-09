@@ -11,7 +11,7 @@
 - 基于 LangGraph 设计 Orchestrator–Worker 多智能体架构，将医疗咨询拆分为通用咨询、症状分诊和循证研究任务；通过强类型 `RoutePlan` 描述意图、风险、任务依赖和 Worker 能力，并按依赖关系动态选择单 Agent、并行或串行执行。
 - 构建确定性 Agent 路由与安全控制层，基于运行时 Agent Catalog 校验能力匹配、任务预算、重复任务及循环依赖，对非法规划进行自动修复或安全降级；急症场景强制优先执行风险分诊，避免外部检索阻塞紧急提示。
 - 设计可发现、可白名单隔离的医疗 Skill 体系，使 Worker 通过 Function Calling 自主选择问诊信息采集、风险评估、症状分析、生活方式建议和深度研究等工具，同时限制越权调用，降低 LLM 规划和工具执行的不可控性。
-- 基于 Redis 实现会话级短期记忆，使用事务 Pipeline 完成原子追加、定长裁剪和 TTL 刷新，默认保留最近 20 轮、24 小时过期；增加同会话串行化、健康检查和故障显式降级，后端异常时通过 HTTP 503 暴露真实状态。
+- 基于 Redis 实现会话级短期记忆，使用事务 Pipeline 完成原子追加、定长裁剪和 TTL 刷新，默认保留最近 10 轮、24 小时过期；增加同会话串行化、健康检查和故障显式降级，后端异常时通过 HTTP 503 暴露真实状态。
 - 建立覆盖 LangGraph、Agent、LLM、Tool 和 SafetyGuard 的可观测链路，支持本地事件追踪与可选 LangSmith Trace；默认脱敏医疗文本和敏感字段，并通过 HMAC 生成不可逆会话标识，兼顾故障定位与隐私保护。
 - 搭建 FastAPI 异步服务及 React/TypeScript 调试端与用户端，提供任务创建、状态与事件查询、Agent/Skill 元数据、会话管理和健康检查接口；使用 Pytest 覆盖路由、安全、记忆、API 和可观测性，当前非集成测试 **96 项全部通过**。
 
@@ -24,7 +24,7 @@ Python、LangGraph、OpenAI SDK、FastAPI、Pydantic、Redis、LangSmith、React
 - 基于 LangGraph 实现 Orchestrator–Worker 多 Agent 工作流，由咨询、症状分析和循证研究 Worker 协作完成医疗问答，支持强类型规划及 single / parallel / sequential 依赖调度。
 - 设计运行时 Agent Catalog、Skill 自动发现与白名单机制，通过 Function Calling 实现 Worker 自主选工具，并校验能力匹配、任务预算、重复任务及依赖关系，对异常规划自动修复或安全降级。
 - 建立“确定性急症预检 + 执行期安全约束 + 输出 SafetyGuard”三层防护，高风险请求强制优先分诊，拦截危险用药建议、过度诊断和缺失急症提示。
-- 使用 Redis Pipeline 实现最近 20 轮会话记忆、24 小时 TTL、同会话串行化和故障感知；接入 FastAPI、React 调试界面及 LangSmith 脱敏追踪，96 项非集成自动化测试全部通过。
+- 使用 Redis Pipeline 实现最近 10 轮会话记忆、24 小时 TTL、同会话串行化和故障感知；接入 FastAPI、React 调试界面及 LangSmith 脱敏追踪，96 项非集成自动化测试全部通过。
 
 ## 极简版（版面有限时）
 

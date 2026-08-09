@@ -37,6 +37,13 @@ class ConsultationParticipant(BaseModel):
     state: Literal["waiting", "active", "done", "failed"]
 
 
+class ConsultationAnalysisStep(BaseModel):
+    id: Literal["risk", "focus", "evidence", "collaboration", "safety"]
+    label: str
+    summary: str
+    state: Literal["pending", "active", "done", "skipped", "attention"]
+
+
 class ConsultationProgress(BaseModel):
     current_phase: Literal[
         "understanding",
@@ -47,6 +54,7 @@ class ConsultationProgress(BaseModel):
     ]
     completed_phases: List[str] = Field(default_factory=list)
     participants: List[ConsultationParticipant] = Field(default_factory=list)
+    analysis_steps: List[ConsultationAnalysisStep] = Field(default_factory=list)
     safety_checked: bool = False
 
 

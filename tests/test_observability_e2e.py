@@ -79,7 +79,7 @@ def test_nested_spans_roll_up_into_one_root_summary(monkeypatch):
             metadata={"session_id": "private-session"},
             output_mapper=lambda result: {
                 "status": "success",
-                "route": "swarm",
+                "route": "multiple_tasks",
                 "answer_length": len(result["answer"]),
             },
         )
@@ -94,7 +94,7 @@ def test_nested_spans_roll_up_into_one_root_summary(monkeypatch):
     assert "private-session" not in repr(captured)
     root_output = roots[0]["output"]
     assert root_output["status"] == "success"
-    assert root_output["route"] == "swarm"
+    assert root_output["route"] == "multiple_tasks"
     assert root_output["answer_length"] == len("private final")
     assert root_output["agent_count"] == 2
     assert root_output["llm_call_count"] == 2
@@ -157,7 +157,7 @@ def test_llm_timeout_is_safe_and_rolls_up_as_failed_call(monkeypatch):
             func=request,
             output_mapper=lambda value: {
                 "status": value["status"],
-                "route": "fallback",
+                "route": "safe_fallback",
             },
         )
     )

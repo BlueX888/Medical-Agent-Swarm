@@ -332,7 +332,7 @@ async def test_graph_saves_exactly_one_user_visible_turn():
             "question": "当前问题",
             "result": {"answer": "最终回答"},
             "start_time": datetime.now(),
-            "mode": "single_agent",
+            "mode": "single_task",
             "run_id": "run-a",
         }
     )
@@ -343,7 +343,7 @@ async def test_graph_saves_exactly_one_user_visible_turn():
             "question": "当前问题",
             "result": {"answer": "最终回答"},
             "start_time": datetime.now(),
-            "mode": "single_agent",
+            "mode": "single_task",
             "run_id": "run-a",
         }
     )
@@ -374,7 +374,7 @@ async def test_graph_claims_non_transactional_long_term_write_once_per_run():
         "question": "current question",
         "result": {"answer": "final answer"},
         "start_time": datetime.now(),
-        "mode": "single_agent",
+        "mode": "single_task",
         "run_id": "durable-run-a",
     }
 
@@ -406,7 +406,7 @@ async def test_graph_retries_failed_long_term_outbox_effect():
         "question": "current question",
         "result": {"answer": "final answer"},
         "start_time": datetime.now(),
-        "mode": "single_agent",
+        "mode": "single_task",
         "run_id": "retry-run-a",
     }
 
@@ -446,7 +446,7 @@ async def test_checkpoint_keeps_failed_effect_node_resumable():
         "question": "current question",
         "result": {"answer": "final answer"},
         "start_time": datetime.now(),
-        "mode": "single_agent",
+        "mode": "single_task",
         "run_id": "effect-recovery-run",
     }
 
@@ -482,7 +482,7 @@ async def test_unknown_provider_outcome_is_not_automatically_retried():
         "question": "current question",
         "result": {"answer": "final answer"},
         "start_time": datetime.now(),
-        "mode": "single_agent",
+        "mode": "single_task",
         "run_id": "unknown-run-a",
     }
 
@@ -524,6 +524,7 @@ async def test_full_swarm_workflow_persists_only_one_completed_turn(
         }
     )
 
+    assert state["route"] == "multiple_tasks"
     assert state["result"]["swarm_enabled"] is True
     history = await memory.load_context("swarm-session", max_turns=10)
     assert [(message["role"], message["content"]) for message in history] == [

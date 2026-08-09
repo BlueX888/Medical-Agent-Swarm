@@ -133,9 +133,9 @@ class MedicalSwarmGraph:
             "route_by_subtasks",
             self._select_route,
             {
-                "single_agent": "run_single_agent",
-                "swarm": "run_swarm",
-                "fallback": "run_fallback",
+                "single_task": "run_single_agent",
+                "multiple_tasks": "run_swarm",
+                "safe_fallback": "run_fallback",
                 "disabled_swarm": "run_fallback",
             },
         )
@@ -599,13 +599,13 @@ class MedicalSwarmGraph:
         if execution_mode == ExecutionMode.SINGLE or (
             execution_mode is None and len(subtasks) == 1
         ):
-            route = "single_agent"
+            route = "single_task"
         elif execution_mode in {ExecutionMode.PARALLEL, ExecutionMode.SEQUENTIAL} and self.enable_swarm:
-            route = "swarm"
+            route = "multiple_tasks"
         elif execution_mode is None and len(subtasks) >= 2 and self.enable_swarm:
-            route = "swarm"
+            route = "multiple_tasks"
         elif len(subtasks) == 0:
-            route = "fallback"
+            route = "safe_fallback"
         else:
             route = "disabled_swarm"
 
@@ -862,7 +862,7 @@ class MedicalSwarmGraph:
 
             summary_saved = False
             summary_error = None
-            if self.enable_long_term_memory and mode == "swarm" and shared_context:
+            if self.enable_long_term_memory and mode == "multiple_tasks" and shared_context:
                 try:
                     if await self._claim_memory_effect(state, "session_summary"):
                         summary = SessionSummary.from_shared_context(
@@ -899,7 +899,7 @@ class MedicalSwarmGraph:
                             "run_id": state.get("run_id"),
                             "total_time": (end_time - state["start_time"]).total_seconds(),
                         }
-                        if mode == "swarm" and shared_context:
+                        if mode == "multiple_tasks" and shared_context:
                             metadata.update(
                                 {
                                     "agents_count": len(shared_context.agent_contributions),
@@ -1013,7 +1013,7 @@ class MedicalSwarmGraph:
 
     async def build_response(self, state: MedicalSwarmState) -> Dict[str, Any]:
         """Build the API-compatible final result."""
-        mode = state.get("mode") or state.get("route") or "fallback"
+        mode = state.get("mode") or state.get("route") or "safe_fallback"
         result = dict(state.get("result") or {})
         final_answer = strip_trailing_structured_metadata(
             state.get("final_answer") or result.get("answer", "")
@@ -1021,7 +1021,7 @@ class MedicalSwarmGraph:
         result["answer"] = final_answer
         result["sources"] = list(state.get("grounded_sources") or [])
 
-        if mode == "swarm":
+        if mode == "multiple_tasks":
             shared_context = self._shared_context_from_state(state)
             completed_agents = (
                 list(shared_context.agent_contributions.keys()) if shared_context else []
@@ -1311,7 +1311,7 @@ class MedicalSwarmGraph:
         }
 
     def _select_route(self, state: MedicalSwarmState) -> str:
-        return state.get("route") or "fallback"
+        return state.get("route") or "safe_fallback"
 
     def _get_agent_by_id(self, agent_id: Optional[str]):
         return self.agent_catalog.get_worker(agent_id or "")

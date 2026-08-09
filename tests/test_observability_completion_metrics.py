@@ -178,7 +178,7 @@ async def test_root_trace_aggregates_ttft_retries_durations_and_exceptions(monke
         func=request,
         output_mapper=lambda value: {
             "status": value["status"],
-            "route": "fallback",
+            "route": "safe_fallback",
         },
     )
 
@@ -386,7 +386,7 @@ async def test_untraced_root_log_contains_aggregated_metrics(monkeypatch):
         name="medical_swarm_request",
         run_type="chain",
         func=request,
-        output_mapper=lambda _: {"status": "success", "route": "fallback"},
+        output_mapper=lambda _: {"status": "success", "route": "safe_fallback"},
     )
 
     root_events = [

@@ -24,7 +24,7 @@ APP_NAME = "medical-agent-swarm"
 
 VALID_ENVIRONMENTS = {"local", "test", "staging", "production"}
 VALID_ENTRYPOINTS = {"api", "cli", "python", "benchmark"}
-VALID_ROUTES = {"single_agent", "swarm", "fallback", "unknown"}
+VALID_ROUTES = {"single_task", "multiple_tasks", "safe_fallback", "unknown"}
 VALID_STATUSES = {"success", "failed", "timeout", "blocked", "degraded"}
 
 SENSITIVE_KEYS = {

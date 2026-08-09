@@ -23,7 +23,7 @@ def test_common_metadata_uses_stable_low_cardinality_schema(monkeypatch):
     metadata = build_observability_metadata(
         run_id="9b812865-50c9-4561-b8e4-e1f63f4d2d52",
         session_id="patient-session-42",
-        route="swarm",
+        route="multiple_tasks",
         status="success",
     )
 
@@ -35,7 +35,7 @@ def test_common_metadata_uses_stable_low_cardinality_schema(monkeypatch):
         "entrypoint": "cli",
         "run_id": "9b812865-50c9-4561-b8e4-e1f63f4d2d52",
         "session_ref": session_reference("patient-session-42"),
-        "route": "swarm",
+        "route": "multiple_tasks",
         "status": "success",
     }
     assert "patient-session-42" not in metadata["session_ref"]

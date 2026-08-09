@@ -131,6 +131,7 @@ async def test_graph_uses_route_plan_and_keeps_public_result_shape():
     )
     result = state["result"]
 
+    assert state["route"] == "single_task"
     assert result["swarm_enabled"] is False
     assert result["agents_involved"] == ["consultation_agent"]
     assert result["timeout_occurred"] is False

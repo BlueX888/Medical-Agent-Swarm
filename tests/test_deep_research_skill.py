@@ -17,7 +17,8 @@ SCRIPT_PATHS = [
 
 
 def _load_script(path: Path):
-    module_name = f"test_deep_research_{path.parts[-4]}"
+    platform_name = path.parts[-5].lstrip(".")
+    module_name = f"test_deep_research_{platform_name}"
     spec = importlib.util.spec_from_file_location(module_name, path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

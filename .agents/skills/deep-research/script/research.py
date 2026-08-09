@@ -1,8 +1,5 @@
 """
-Deep Research Skill.
-
-Runs a local evidence-memory lookup before expensive live web research. The
-return shape is kept compatible with the existing Agent tool integration.
+Deep Research Skill backed by live web search and evidence synthesis.
 """
 from __future__ import annotations
 
@@ -35,25 +32,7 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
     logger.info(f"Starting deep research: query={query}, max_iterations={max_iterations}")
     _ensure_project_root_on_path()
 
-    from memory.evidence_cache import EvidenceMemory
     from research.deep_research_workflow import DeepResearchWorkflow
-
-    evidence_memory = EvidenceMemory()
-    cached = evidence_memory.lookup(query)
-    if cached:
-        return {
-            "answer": cached.get("answer", ""),
-            "findings": cached.get("findings", []),
-            "confidence": cached.get("confidence", "medium"),
-            "sources": cached.get("sources", 0),
-            "evidence_level": cached.get("evidence_level", "B"),
-            "status": "completed",
-            "cache_hit": True,
-            "memory_source": cached.get("source", "evidence_memory"),
-            "memory_match_score": cached.get("match_score"),
-            "matched_query": cached.get("matched_query", ""),
-            "data_sources": "Local Evidence Memory",
-        }
 
     try:
         max_iterations = int(max_iterations or 2)
@@ -84,10 +63,8 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "sources": len(report.sources),
             "evidence_level": report.evidence_level,
             "status": "completed",
-            "cache_hit": False,
             "data_sources": "Web Search + Evidence Synthesis",
         }
-        evidence_memory.store(query, result)
         return result
 
     except Exception as exc:
@@ -98,7 +75,6 @@ async def deep_research(query: str, max_iterations: int = 2) -> Dict[str, Any]:
             "confidence": "low",
             "sources": 0,
             "status": "error",
-            "cache_hit": False,
         }
 
 
